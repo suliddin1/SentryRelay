@@ -1,0 +1,40 @@
+{
+  "project_name": "SentryRelay",
+  "repository": "https://github.com/suliddin1/SentryRelay",
+  "current_phase": "Phase 2: Observability, Metrics & Production Hardening",
+  "current_session_date": "2026-10-03",
+  "last_completed_session_date": "2026-10-03",
+  "capabilities_completed": [
+    "Go module initialization with zero-CGO pure Go SQLite persistence",
+    "Durable transactional ingestion with SQLite WAL mode and busy timeouts",
+    "Tenant HMAC-SHA256 signature verification with constant-time comparison",
+    "Replay attack defense via timestamp tolerance window",
+    "Idempotent event deduplication (compound constraint on tenant_id + idempotency_key)",
+    "Lease-based visibility timeout state machine (PENDING, IN_FLIGHT, DELIVERED, RETRY_PENDING, DEAD_LETTER)",
+    "Concurrent worker pool with atomic batch claiming",
+    "Outbound HTTP delivery with header forwarding and metadata tracking",
+    "Response classification (success vs transient retryable vs permanent client errors)",
+    "Full jitter exponential backoff retry scheduling",
+    "Dead-Letter Queue (DLQ) transitions and REST replay API",
+    "Crash recovery reaper that recovers abandoned in-flight leases upon restart",
+    "Comprehensive test suite (unit, storage concurrency, HTTP, crash recovery, E2E)",
+    "Performance benchmarks (905k crypto ops/s, 6.6k SQLite WAL tx/s, 5.65k HTTP req/s)",
+    "Automated GitHub Actions CI workflow"
+  ],
+  "active_priorities": [
+    "Phase 2: Prometheus metrics endpoint (/metrics) for queue depth, attempt latencies, and worker utilization",
+    "Phase 2: Structured JSON logging with trace correlation",
+    "Phase 3: Per-tenant rate limiting and destination backpressure",
+    "Phase 4: Dedicated operational CLI (sentryrelay-ctl) for headless queue and DLQ triage"
+  ],
+  "known_technical_debt": [],
+  "metrics_and_benchmarks": {
+    "benchmark_environment": "Intel Core i7-13650HX, Windows amd64, Go 1.27.0",
+    "crypto_sign_and_verify_ns_op": 1104,
+    "crypto_ops_per_sec": 905797,
+    "storage_wal_ingest_ns_op": 151015,
+    "storage_wal_tx_per_sec": 6621,
+    "http_ingest_pipeline_ns_op": 176964,
+    "http_ingest_req_per_sec": 5650
+  }
+}
