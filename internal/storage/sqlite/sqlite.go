@@ -677,3 +677,47 @@ func (d *DB) GetQueueDepths(ctx context.Context) (map[string]int, error) {
 	}
 	return counts, nil
 }
+
+// ListQueueJobs retrieves active jobs (PENDING, IN_FLIGHT, RETRY_PENDING) for operational inspection.
+func (d *DB) ListQueueJobs(ctx context.Context, limit, offset int) ([]*model.DeliveryJob, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	query := `
+		SELECT id, event_id, status, attempt_count, max_attempts, next_retry_at,
+		       leased_at, leased_until, created_at, updated_at
+		FROM delivery_jobs
+		WHERE status IN (?, ?, ?)
+		ORDER BY created_at ASC
+		LIMIT ? OFFSET ?`
+
+	rows, err := d.db.QueryContext(ctx, query, 
+		string(model.StatusPending), string(model.StatusInFlight), string(model.StatusRetryPending),
+		limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query queue jobs: %w", err)
+	}
+	defer rows.Close()
+
+	var jobs []*model.DeliveryJob
+	for rows.Next() {
+		var j model.DeliveryJob
+		var statusStr string
+		var nextRetryMs, createdMs, updatedMs int64
+		var leasedAtMs, leasedUntilMs sql.NullInt64
+
+		if err := rows.Scan(&j.ID, &j.EventID, &statusStr, &j.AttemptCount, &j.MaxAttempts, &nextRetryMs,
+			&leasedAtMs, &leasedUntilMs, &createdMs, &updatedMs); err != nil {
+			return nil, fmt.Errorf("failed to scan queue job: %w", err)
+		}
+		j.Status = model.DeliveryStatus(statusStr)
+		j.NextRetryAt = fromEpochMs(nextRetryMs)
+		j.LeasedAt = epochMsToNullTime(leasedAtMs)
+		j.LeasedUntil = epochMsToNullTime(leasedUntilMs)
+		j.CreatedAt = fromEpochMs(createdMs)
+		j.UpdatedAt = fromEpochMs(updatedMs)
+		
+		jobs = append(jobs, &j)
+	}
+	return jobs, nil
+}

@@ -57,8 +57,8 @@
 - [x] Destination concurrency limits to avoid overwhelming target endpoints
 - [x] Backpressure mechanisms on ingestion when queue exceeds threshold
 
-## Phase 4: Operational Tooling & CLI
-- [ ] Implement `sentryrelay-ctl` management CLI:
+## Phase 4: Operational Tooling & CLI (Completed)
+- [x] Implement `sentryrelay-ctl` management CLI:
   - `status`: Display system stats, queue depth, active worker count
   - `queue inspect`: View in-flight and pending jobs
   - `dlq list`: List dead-lettered events with failure diagnostics

@@ -28,6 +28,7 @@ type Server struct {
 	defaultMaxRetry        int
 	replayTolerance        time.Duration
 	allowLocalDestinations bool
+	startedAt              time.Time
 }
 
 // Config provides configuration parameters for the HTTP server.
@@ -66,6 +67,7 @@ func NewServer(cfg Config, db *sqlite.DB) *Server {
 		defaultMaxRetry:        cfg.DefaultMaxRetry,
 		replayTolerance:        cfg.ReplayTolerance,
 		allowLocalDestinations: cfg.AllowLocalDestinations,
+		startedAt:              time.Now().UTC(),
 	}
 
 	s.routes()
@@ -82,8 +84,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
 	s.mux.Handle("POST /v1/ingest", telemetry.Middleware(http.HandlerFunc(s.handleIngest), "ingest"))
 	s.mux.HandleFunc("GET /v1/jobs/{id}", s.handleGetJob)
+	s.mux.HandleFunc("GET /v1/queue", s.handleListQueue)
 	s.mux.HandleFunc("GET /v1/dlq", s.handleListDLQ)
 	s.mux.HandleFunc("POST /v1/dlq/{id}/replay", s.handleReplayDLQ)
+	s.mux.HandleFunc("GET /v1/status", s.handleStatus)
 	s.mux.Handle("GET /metrics", promhttp.Handler())
 }
 
@@ -330,6 +334,54 @@ func (s *Server) handleReplayDLQ(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	uptime := time.Since(s.startedAt)
+	totalDepth := telemetry.TotalQueueDepth()
+
+	// In a real system, active worker count might be queried from the worker pool.
+	// Since we don't expose it directly yet, we return the total queue depth and uptime.
+	status := map[string]interface{}{
+		"status":             "ok",
+		"uptime_seconds":     int(uptime.Seconds()),
+		"queue_depth_active": totalDepth,
+	}
+
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (s *Server) handleListQueue(w http.ResponseWriter, r *http.Request) {
+	limit := 50
+	offset := 0
+
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if val, err := strconv.Atoi(l); err == nil && val > 0 {
+			limit = val
+		}
+	}
+	if o := r.URL.Query().Get("offset"); o != "" {
+		if val, err := strconv.Atoi(o); err == nil && val >= 0 {
+			offset = val
+		}
+	}
+
+	jobs, err := s.db.ListQueueJobs(r.Context(), limit, offset)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	if jobs == nil {
+		jobs = []*model.DeliveryJob{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"queue_jobs": jobs,
+		"count":      len(jobs),
+		"limit":      limit,
+		"offset":     offset,
+	})
+}
+
 func writeJSON(w http.ResponseWriter, statusCode int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
@@ -339,3 +391,4 @@ func writeJSON(w http.ResponseWriter, statusCode int, data interface{}) {
 func writeError(w http.ResponseWriter, statusCode int, message string) {
 	writeJSON(w, statusCode, map[string]string{"error": message})
 }
+

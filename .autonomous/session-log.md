@@ -151,3 +151,28 @@
   - Wrote `TestTenantLimiter` and `TestDestinationLimiter` for the `ratelimit` package.
   - All tests passed successfully with data race checking active.
 - **Build**: `cmd/sentryrelay` compiled successfully.
+
+---
+
+## Session 2026-10-03 (Phase 4): Operational Tooling & CLI
+- **Date**: 2026-10-03
+- **Objective**: Develop a headless CLI utility (`sentryrelay-ctl`) for system operators to inspect and triage the delivery queues and dead-letter queues over HTTP.
+- **Status**: Completed Successfully
+
+### Work Completed:
+1. **Extended Operational API**:
+   - Added `GET /v1/status` exposing uptime and real-time total queue depth.
+   - Added `GET /v1/queue` listing active jobs (`PENDING`, `IN_FLIGHT`, `RETRY_PENDING`).
+   - Extended `internal/storage/sqlite` with `ListQueueJobs()` database query.
+2. **`sentryrelay-ctl` CLI Implementation**:
+   - Implemented `cmd/sentryrelay-ctl/main.go` using the standard `flag` and `net/http` packages to interface with the SentryRelay REST API.
+   - Handled formatting JSON API responses into human-readable console outputs.
+   - Commands implemented:
+     - `status`: Displays overall system health.
+     - `queue inspect`: Displays top pending/in-flight jobs with retry counts.
+     - `dlq list`: Lists dead-lettered events with granular failure reasons (`last_error_message`).
+     - `dlq replay <job_id>`: Invokes the replay API and resets a job to `PENDING` state.
+
+### Verification Evidence:
+- **Build**: `cmd/sentryrelay-ctl` built successfully.
+- **Tests**: `go test -v -race ./...` passed with zero errors, confirming no regressions in the core `server` package.

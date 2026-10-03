@@ -1,7 +1,7 @@
 {
   "project_name": "SentryRelay",
   "repository": "https://github.com/suliddin1/SentryRelay",
-  "current_phase": "Phase 4: Operational Tooling & CLI",
+  "current_phase": "Phase 5: Fault Injection & Chaos Testing",
   "current_session_date": "2026-10-03",
   "last_completed_session_date": "2026-10-03",
   "capabilities_completed": [
@@ -32,10 +32,10 @@
     "Health and readiness probes (/healthz, /readyz)",
     "Per-tenant ingestion rate limiting (in-memory token bucket via x/time/rate)",
     "Destination concurrency limiting (in-memory channel-based semaphore per host)",
-    "Ingestion backpressure via atomic queue depth threshold checks"
+    "Ingestion backpressure via atomic queue depth threshold checks",
+    "Dedicated operational CLI (sentryrelay-ctl) for headless triage and API integration (status, queue inspect, dlq list, dlq replay)"
   ],
   "active_priorities": [
-    "Phase 4: Dedicated operational CLI (sentryrelay-ctl) for headless queue and DLQ triage",
     "Phase 5: Fault Injection & Chaos Testing"
   ],
   "known_technical_debt": [],
