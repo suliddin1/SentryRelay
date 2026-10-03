@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/suliddin1/SentryRelay/internal/delivery"
 	"github.com/suliddin1/SentryRelay/internal/model"
+	"github.com/suliddin1/SentryRelay/internal/ratelimit"
 	"github.com/suliddin1/SentryRelay/internal/retry"
 	"github.com/suliddin1/SentryRelay/internal/storage/sqlite"
 	"github.com/suliddin1/SentryRelay/internal/telemetry"
@@ -18,35 +20,38 @@ import (
 
 // Config configures the worker pool and lease reaper.
 type Config struct {
-	NumWorkers     int
-	BatchSize      int
-	PollInterval   time.Duration
-	LeaseDuration  time.Duration
-	ReaperInterval time.Duration
-	RetryPolicy    retry.Policy
+	NumWorkers         int
+	BatchSize          int
+	PollInterval       time.Duration
+	LeaseDuration      time.Duration
+	ReaperInterval     time.Duration
+	RetryPolicy        retry.Policy
+	MaxDestConcurrency int
 }
 
 // DefaultConfig provides recommended production settings.
 func DefaultConfig() Config {
 	return Config{
-		NumWorkers:     5,
-		BatchSize:      10,
-		PollInterval:   100 * time.Millisecond,
-		LeaseDuration:  30 * time.Second,
-		ReaperInterval: 5 * time.Second,
-		RetryPolicy:    retry.DefaultPolicy(),
+		NumWorkers:         5,
+		BatchSize:          10,
+		PollInterval:       100 * time.Millisecond,
+		LeaseDuration:      30 * time.Second,
+		ReaperInterval:     5 * time.Second,
+		RetryPolicy:        retry.DefaultPolicy(),
+		MaxDestConcurrency: 10,
 	}
 }
 
 // Pool manages concurrent dispatch of delivery jobs and lease reclamation.
 type Pool struct {
-	cfg      Config
-	db       *sqlite.DB
-	client   *delivery.Client
-	stopCh   chan struct{}
-	wg       sync.WaitGroup
-	startMut sync.Mutex
-	running  bool
+	cfg         Config
+	db          *sqlite.DB
+	client      *delivery.Client
+	destLimiter *ratelimit.DestinationLimiter
+	stopCh      chan struct{}
+	wg          sync.WaitGroup
+	startMut    sync.Mutex
+	running     bool
 }
 
 // NewPool initializes a new worker pool.
@@ -66,12 +71,16 @@ func NewPool(cfg Config, db *sqlite.DB, client *delivery.Client) *Pool {
 	if cfg.ReaperInterval <= 0 {
 		cfg.ReaperInterval = 5 * time.Second
 	}
+	if cfg.MaxDestConcurrency <= 0 {
+		cfg.MaxDestConcurrency = 10
+	}
 
 	return &Pool{
-		cfg:    cfg,
-		db:     db,
-		client: client,
-		stopCh: make(chan struct{}),
+		cfg:         cfg,
+		db:          db,
+		client:      client,
+		destLimiter: ratelimit.NewDestinationLimiter(cfg.MaxDestConcurrency),
+		stopCh:      make(chan struct{}),
 	}
 }
 
@@ -184,10 +193,36 @@ func (p *Pool) processJob(ctx context.Context, job *model.DeliveryJob) {
 		return
 	}
 
-	// 2. Deliver payload to destination
-	start := time.Now()
-	res := p.client.Deliver(ctx, jobWithEvent, event)
-	duration := time.Since(start)
+	var res delivery.Result
+	var duration time.Duration
+
+	u, err := url.Parse(event.DestinationURL)
+	var host string
+	if err == nil {
+		host = u.Host
+	}
+
+	// 2. Enforce Destination Concurrency Limit
+	if host != "" && !p.destLimiter.TryAcquire(host) {
+		res = delivery.Result{
+			Classification: retry.ClassificationTransient,
+			Attempt: &model.DeliveryAttempt{
+				JobID:               job.ID,
+				AttemptNumber:       jobWithEvent.AttemptCount + 1,
+				StatusCode:          429,
+				ExecutionDurationMs: 0,
+				ErrorMessage:        "destination concurrency limit reached",
+			},
+		}
+	} else {
+		// Deliver payload to destination
+		start := time.Now()
+		res = p.client.Deliver(ctx, jobWithEvent, event)
+		duration = time.Since(start)
+		if host != "" {
+			p.destLimiter.Release(host)
+		}
+	}
 
 	telemetry.DeliveryLatency.WithLabelValues(strconv.Itoa(res.Attempt.StatusCode)).Observe(duration.Seconds())
 

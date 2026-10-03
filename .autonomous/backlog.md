@@ -52,10 +52,10 @@
 - [x] Structured JSON logging (`slog`) with contextual trace/event IDs
 - [x] Refined health check and readiness probes (`/healthz`, `/readyz`)
 
-## Phase 3: Rate Limiting & Tenant Protection
-- [ ] Per-tenant ingestion rate limits (token bucket)
-- [ ] Destination concurrency limits to avoid overwhelming target endpoints
-- [ ] Backpressure mechanisms on ingestion when queue exceeds threshold
+## Phase 3: Rate Limiting & Tenant Protection (Completed)
+- [x] Per-tenant ingestion rate limits (token bucket)
+- [x] Destination concurrency limits to avoid overwhelming target endpoints
+- [x] Backpressure mechanisms on ingestion when queue exceeds threshold
 
 ## Phase 4: Operational Tooling & CLI
 - [ ] Implement `sentryrelay-ctl` management CLI:

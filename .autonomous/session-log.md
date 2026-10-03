@@ -125,3 +125,29 @@
   - All 20 tests across all packages passed successfully with data race checking active.
   - Tests properly logged with JSON formatted logs instead of raw strings.
 - **Build**: `cmd/sentryrelay` compiled successfully with new external prometheus dependencies.
+
+---
+
+## Session 2026-10-03 (Phase 3): Rate Limiting & Tenant Protection
+- **Date**: 2026-10-03
+- **Objective**: Protect SentryRelay from noisy-neighbor tenants, prevent overwhelming target endpoints, and introduce global ingestion backpressure.
+- **Status**: Completed Successfully
+
+### Work Completed:
+1. **Per-Tenant Rate Limiting**:
+   - Pulled `golang.org/x/time/rate`.
+   - Created `ratelimit.TenantLimiter` using thread-safe map of token buckets per tenant.
+   - Enforced default limit of 100 req/sec (burst 200) in the `POST /v1/ingest` handler (`HTTP 429 Too Many Requests`).
+2. **Destination Concurrency Limits**:
+   - Created `ratelimit.DestinationLimiter` to constrain concurrent outbound requests per host.
+   - Enforced non-blocking `TryAcquire` lock before making HTTP requests.
+   - If capacity (default 10) is reached, worker immediately treats it as a transient error without blocking (simulates 429) and schedules an exponential backoff retry.
+3. **Queue Depth Backpressure**:
+   - Exposed total active queue depth via `telemetry.TotalQueueDepth()` (sum of `PENDING` + `RETRY_PENDING`) which is updated organically every 5 seconds by the background metrics collector.
+   - HTTP Server now returns `503 Service Unavailable` with `Retry-After: 30` if global queue depth exceeds threshold (default 100,000).
+
+### Verification Evidence:
+- **Test Suite (`go test -v -race ./...`)**:
+  - Wrote `TestTenantLimiter` and `TestDestinationLimiter` for the `ratelimit` package.
+  - All tests passed successfully with data race checking active.
+- **Build**: `cmd/sentryrelay` compiled successfully.

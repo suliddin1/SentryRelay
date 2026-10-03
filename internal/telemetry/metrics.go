@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -45,6 +46,15 @@ type DB interface {
 	GetQueueDepths(ctx context.Context) (map[string]int, error)
 }
 
+var (
+	currentTotalDepth atomic.Int64
+)
+
+// TotalQueueDepth returns the most recently observed total queue depth (PENDING + RETRY_PENDING).
+func TotalQueueDepth() int64 {
+	return currentTotalDepth.Load()
+}
+
 // StartMetricsCollector starts a background goroutine to periodically update DB gauges.
 func StartMetricsCollector(ctx context.Context, db DB, interval time.Duration) {
 	go func() {
@@ -74,4 +84,9 @@ func updateQueueDepths(ctx context.Context, db DB) {
 	for _, st := range statuses {
 		QueueDepth.WithLabelValues(st).Set(float64(counts[st]))
 	}
+
+	// Calculate total active queue depth for backpressure
+	totalActive := counts["PENDING"] + counts["RETRY_PENDING"]
+	currentTotalDepth.Store(int64(totalActive))
 }
+

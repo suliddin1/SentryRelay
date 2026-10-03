@@ -12,15 +12,19 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/suliddin1/SentryRelay/internal/model"
+	"github.com/suliddin1/SentryRelay/internal/ratelimit"
 	"github.com/suliddin1/SentryRelay/internal/security"
 	"github.com/suliddin1/SentryRelay/internal/storage/sqlite"
 	"github.com/suliddin1/SentryRelay/internal/telemetry"
+	"golang.org/x/time/rate"
 )
 
 // Server coordinates HTTP ingestion and operational diagnostics.
 type Server struct {
 	db                     *sqlite.DB
 	mux                    *http.ServeMux
+	tenantLimiter          *ratelimit.TenantLimiter
+	maxQueueDepth          int64
 	defaultMaxRetry        int
 	replayTolerance        time.Duration
 	allowLocalDestinations bool
@@ -31,6 +35,9 @@ type Config struct {
 	DefaultMaxRetry        int
 	ReplayTolerance        time.Duration
 	AllowLocalDestinations bool
+	TenantRateLimit        float64
+	TenantBurstLimit       int
+	MaxQueueDepth          int64
 }
 
 // NewServer initializes HTTP routes for webhook ingestion, health probes, and DLQ management.
@@ -41,10 +48,21 @@ func NewServer(cfg Config, db *sqlite.DB) *Server {
 	if cfg.ReplayTolerance <= 0 {
 		cfg.ReplayTolerance = security.DefaultTimestampTolerance
 	}
+	if cfg.TenantRateLimit <= 0 {
+		cfg.TenantRateLimit = 100 // default 100 req/sec per tenant
+	}
+	if cfg.TenantBurstLimit <= 0 {
+		cfg.TenantBurstLimit = 200
+	}
+	if cfg.MaxQueueDepth <= 0 {
+		cfg.MaxQueueDepth = 100000 // default 100k
+	}
 
 	s := &Server{
 		db:                     db,
 		mux:                    http.NewServeMux(),
+		tenantLimiter:          ratelimit.NewTenantLimiter(rate.Limit(cfg.TenantRateLimit), cfg.TenantBurstLimit),
+		maxQueueDepth:          cfg.MaxQueueDepth,
 		defaultMaxRetry:        cfg.DefaultMaxRetry,
 		replayTolerance:        cfg.ReplayTolerance,
 		allowLocalDestinations: cfg.AllowLocalDestinations,
@@ -90,9 +108,23 @@ type IngestEnvelope struct {
 }
 
 func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
+	// 0. Backpressure Check
+	if telemetry.TotalQueueDepth() >= s.maxQueueDepth {
+		w.Header().Set("Retry-After", "30")
+		writeError(w, http.StatusServiceUnavailable, "system at capacity: queue depth exceeds limit")
+		return
+	}
+
 	tenantID := r.Header.Get("X-SentryRelay-Tenant-ID")
 	if tenantID == "" {
 		writeError(w, http.StatusBadRequest, "missing required header: X-SentryRelay-Tenant-ID")
+		return
+	}
+
+	// 0.5 Rate Limit Check per Tenant
+	if !s.tenantLimiter.Allow(tenantID) {
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, "rate limit exceeded for tenant")
 		return
 	}
 
