@@ -33,7 +33,17 @@
   - Ingestion benchmark
 - [x] CI/CD Workflow (`.github/workflows/ci.yml`)
 
-## Phase 2: Observability, Metrics & Telemetry (Next Up)
+## Phase 1.1: Core Correctness, Data Integrity & Persistence Hardening (Completed)
+- [x] Connection pool pragma enforcement & single-writer connection configuration for SQLite (`_pragma` parameters and `SetMaxOpenConns(1)`)
+- [x] Integer/epoch millisecond timestamp storage in SQLite for deterministic, bug-free time comparisons
+- [x] Worker lease fencing in `RecordAttempt` to prevent stale workers from overwriting reclaimed/completed jobs
+- [x] Poison pill mitigation in lease reaper: increment `attempt_count` when recovering abandoned jobs
+- [x] Concurrent ingestion idempotency race handling: handle `UNIQUE` constraint collision gracefully without 500 errors
+- [x] In-memory queue lease freshness validation prior to HTTP delivery
+- [x] Outbound SSRF destination URL validation (reject loopback, private RFC1918, link-local metadata addresses unless permitted)
+- [x] Update ADR-0002, ADR-0003, and README to reflect hardened guarantees
+
+## Phase 2: Observability, Metrics & Telemetry
 - [ ] Prometheus metrics endpoint (`/metrics`):
   - Ingestion throughput and latency histogram
   - Queue depth gauge broken down by status (`PENDING`, `IN_FLIGHT`, `RETRY_PENDING`, `DEAD_LETTER`)

@@ -57,3 +57,41 @@
 - Phase 2: Add Prometheus metrics endpoint (`/metrics`) exposing queue depths by state, attempt durations, and error rates.
 - Phase 2: Integrate structured logging (`slog`) with correlation IDs.
 - Phase 3: Tenant rate limiting and destination concurrency control.
+
+---
+
+## Session 2026-10-03 (Phase 1.1): Core Correctness, Data Integrity & Persistence Hardening
+- **Date**: 2026-10-03
+- **Objective**: Harden storage, concurrency, and security invariants identified in the architecture review before expanding to observability.
+- **Status**: Completed Successfully
+
+### Work Completed:
+1. **SQLite Pool & Pragma Binding**:
+   - Configured SQLite connection pool with `SetMaxOpenConns(1)` and `SetMaxIdleConns(1)`, ensuring pragmas (`WAL`, `synchronous = NORMAL`, `busy_timeout = 5000`, `foreign_keys = ON`) remain permanently active across all operations and eliminating multi-connection write-lock contention.
+2. **Integer Epoch Millisecond Timestamps**:
+   - Replaced RFC3339 string timestamps in SQLite schema with 64-bit integer Unix epoch milliseconds (`int64`).
+   - Completely eliminated string sorting anomalies (e.g. RFC3339 trailing zero truncation where `'Z' > '.'`).
+3. **Worker Lease Fencing**:
+   - Added optimistic fencing in `RecordAttempt`: updates require matching `leased_until`.
+   - Stale workers whose lease expired while executing HTTP requests are prevented from overwriting subsequent workers' state; returns `model.ErrLeaseLost` and records an orphaned attempt log.
+4. **Poison-Pill Mitigation in Lease Reaper**:
+   - Lease reaper now increments `attempt_count` upon reclaiming an abandoned/crashed lease.
+   - Repeated crashers exceeding `max_attempts` transition directly to `DEAD_LETTER`, preventing infinite crash loops.
+5. **Concurrent Duplicate Ingestion Race Handling**:
+   - Handled concurrent insertion races in `IngestEvent`: catches `UNIQUE constraint failed` collisions and gracefully returns `duplicate = true` with `200 OK` rather than failing with 500.
+6. **In-Memory Queue Freshness Check**:
+   - Workers discard jobs from the internal channel if their visibility lease expired while waiting in memory.
+7. **Outbound SSRF Security Filtering**:
+   - Implemented `security.ValidateDestinationURL` blocking loopback, RFC1918 private networks, and cloud metadata (`169.254.169.254`).
+
+### Verification Evidence:
+- **Test Suite (`go test -v -race ./...`)**:
+  - Total test count: 20 tests (up from 17) with zero race conditions.
+  - New regression tests:
+    - `TestRecordAttempt_LeaseFencing`: Verified stale worker cannot overwrite modern job state (PASS).
+    - `TestReapStaleLeases_PoisonPillMaxAttempts`: Verified repeated crashes increment attempt count and dead-letter the job (PASS).
+    - `TestIngestEvent_ConcurrentDuplicateRace`: Verified 10 concurrent requests with identical idempotency keys cleanly return 1 creation and 9 duplicate acknowledgments (PASS).
+    - `TestValidateDestinationURL`: Verified loopback, private networks, and cloud metadata blocking (PASS).
+- **Benchmarks**:
+  - `BenchmarkStorage_IngestEvent`: Latency dropped to 142 µs/op (down from 151 µs/op) and allocations reduced to 98 allocs/op (down from 103 allocs/op).
+

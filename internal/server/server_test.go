@@ -37,8 +37,9 @@ func setupTestServer(t *testing.T) (*Server, *sqlite.DB, *model.Tenant) {
 	}
 
 	srv := NewServer(Config{
-		DefaultMaxRetry: 3,
-		ReplayTolerance: 5 * time.Minute,
+		DefaultMaxRetry:        3,
+		ReplayTolerance:        5 * time.Minute,
+		AllowLocalDestinations: true,
 	}, db)
 
 	return srv, db, tenant
@@ -141,5 +142,20 @@ func TestServer_IngestSecurityFailures(t *testing.T) {
 	srv.Handler().ServeHTTP(recExpired, reqExpired)
 	if recExpired.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 Bad Request for expired timestamp, got %d", recExpired.Code)
+	}
+
+	// 3. SSRF metadata address blocked
+	metadataTimestamp := now.Unix()
+	metadataSig := security.Sign(tenant.Secret, metadataTimestamp, payload)
+	reqSSRF := httptest.NewRequest(http.MethodPost, "/v1/ingest", bytes.NewReader(payload))
+	reqSSRF.Header.Set("X-SentryRelay-Tenant-ID", tenant.ID)
+	reqSSRF.Header.Set("X-SentryRelay-Signature", metadataSig)
+	reqSSRF.Header.Set("X-SentryRelay-Timestamp", strconv.FormatInt(metadataTimestamp, 10))
+	reqSSRF.Header.Set("X-SentryRelay-Idempotency-Key", "idemp_ssrf")
+	reqSSRF.Header.Set("X-SentryRelay-Destination-URL", "http://169.254.169.254/latest/meta-data/")
+	recSSRF := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recSSRF, reqSSRF)
+	if recSSRF.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request for SSRF cloud metadata URL, got %d", recSSRF.Code)
 	}
 }

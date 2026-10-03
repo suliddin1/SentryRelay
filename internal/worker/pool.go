@@ -2,7 +2,9 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -164,6 +166,10 @@ func (p *Pool) workerLoop(ctx context.Context, jobQueue <-chan *model.DeliveryJo
 			if !ok {
 				return
 			}
+			// Skip jobs whose visibility lease expired while waiting in memory
+			if job.LeasedUntil != nil && time.Now().UTC().After(*job.LeasedUntil) {
+				continue
+			}
 			p.processJob(ctx, job)
 		}
 	}
@@ -209,8 +215,15 @@ func (p *Pool) processJob(ctx context.Context, job *model.DeliveryJob) {
 		}
 	}
 
-	// 4. Persist delivery attempt and state transition atomically
-	_ = p.db.RecordAttempt(ctx, res.Attempt, nextStatus, nextRetryAt, errCode, errMsg)
+	// 4. Persist delivery attempt and state transition atomically with lease fencing
+	err = p.db.RecordAttempt(ctx, res.Attempt, jobWithEvent.LeasedUntil, nextStatus, nextRetryAt, errCode, errMsg)
+	if err != nil {
+		if errors.Is(err, model.ErrLeaseLost) {
+			log.Printf("[WARN] Delivery attempt for job %s completed after lease expiration; state transition discarded", job.ID)
+			return
+		}
+		log.Printf("[ERROR] Failed to record delivery attempt for job %s: %v", job.ID, err)
+	}
 }
 
 func (p *Pool) reaperLoop(ctx context.Context) {

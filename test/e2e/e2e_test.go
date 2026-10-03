@@ -63,8 +63,9 @@ func setupE2E(t *testing.T, maxRetries int, retryPolicy retry.Policy) *testEnvir
 	}
 
 	httpSrv := server.NewServer(server.Config{
-		DefaultMaxRetry: maxRetries,
-		ReplayTolerance: 5 * time.Minute,
+		DefaultMaxRetry:        maxRetries,
+		ReplayTolerance:        5 * time.Minute,
+		AllowLocalDestinations: true,
 	}, db)
 	testSrv := httptest.NewServer(httpSrv.Handler())
 

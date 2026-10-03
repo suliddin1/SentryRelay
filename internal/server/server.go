@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -18,16 +17,18 @@ import (
 
 // Server coordinates HTTP ingestion and operational diagnostics.
 type Server struct {
-	db               *sqlite.DB
-	mux              *http.ServeMux
-	defaultMaxRetry  int
-	replayTolerance  time.Duration
+	db                     *sqlite.DB
+	mux                    *http.ServeMux
+	defaultMaxRetry        int
+	replayTolerance        time.Duration
+	allowLocalDestinations bool
 }
 
 // Config provides configuration parameters for the HTTP server.
 type Config struct {
-	DefaultMaxRetry int
-	ReplayTolerance time.Duration
+	DefaultMaxRetry        int
+	ReplayTolerance        time.Duration
+	AllowLocalDestinations bool
 }
 
 // NewServer initializes HTTP routes for webhook ingestion, health probes, and DLQ management.
@@ -40,10 +41,11 @@ func NewServer(cfg Config, db *sqlite.DB) *Server {
 	}
 
 	s := &Server{
-		db:              db,
-		mux:             http.NewServeMux(),
-		defaultMaxRetry: cfg.DefaultMaxRetry,
-		replayTolerance: cfg.ReplayTolerance,
+		db:                     db,
+		mux:                    http.NewServeMux(),
+		defaultMaxRetry:        cfg.DefaultMaxRetry,
+		replayTolerance:        cfg.ReplayTolerance,
+		allowLocalDestinations: cfg.AllowLocalDestinations,
 	}
 
 	s.routes()
@@ -167,9 +169,8 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	parsedURL, err := url.ParseRequestURI(destURL)
-	if err != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
-		writeError(w, http.StatusBadRequest, "destination URL must be a valid HTTP or HTTPS address")
+	if err := security.ValidateDestinationURL(destURL, s.allowLocalDestinations); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 

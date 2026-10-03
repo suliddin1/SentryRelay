@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -294,7 +295,7 @@ func TestDeadLetterAndReplay(t *testing.T) {
 		ExecutionDurationMs: 50,
 		ErrorMessage:        "HTTP 400 Bad Request",
 	}
-	err = db.RecordAttempt(ctx, attempt, model.StatusDeadLetter, time.Time{}, "HTTP_400", "Bad Request")
+	err = db.RecordAttempt(ctx, attempt, nil, model.StatusDeadLetter, time.Time{}, "HTTP_400", "Bad Request")
 	if err != nil {
 		t.Fatalf("failed to record attempt: %v", err)
 	}
@@ -322,5 +323,161 @@ func TestDeadLetterAndReplay(t *testing.T) {
 	if replayedJob.Status != model.StatusPending || replayedJob.AttemptCount != 0 {
 		t.Fatalf("expected job to be reset to PENDING with 0 attempts, got %s (%d attempts)",
 			replayedJob.Status, replayedJob.AttemptCount)
+	}
+}
+
+func TestRecordAttempt_LeaseFencing(t *testing.T) {
+	db := newTestDB(t)
+	tenant := createTestTenant(t, db)
+	ctx := context.Background()
+
+	ev := &model.Event{
+		TenantID:       tenant.ID,
+		IdempotencyKey: "fencing_test",
+		DestinationURL: "https://example.com/webhook",
+		Payload:        []byte(`{}`),
+	}
+	_, job, _, err := db.IngestEvent(ctx, ev, 3)
+	if err != nil {
+		t.Fatalf("failed to ingest: %v", err)
+	}
+
+	// 1. Worker A claims job with 100ms lease
+	claimTime := time.Now().UTC()
+	claimedA, err := db.ClaimJobs(ctx, 1, 100*time.Millisecond, claimTime)
+	if err != nil || len(claimedA) != 1 {
+		t.Fatalf("failed to claim job: %v", err)
+	}
+	workerALeaseUntil := claimedA[0].LeasedUntil
+
+	// 2. Lease expires and reaper reclaims the job
+	time.Sleep(150 * time.Millisecond)
+	reaped, err := db.ReapStaleLeases(ctx, time.Now().UTC())
+	if err != nil || reaped != 1 {
+		t.Fatalf("failed to reap lease: %v (count=%d)", err, reaped)
+	}
+
+	// 3. Worker B claims the reclaimed job
+	claimedB, err := db.ClaimJobs(ctx, 1, 10*time.Second, time.Now().UTC())
+	if err != nil || len(claimedB) != 1 {
+		t.Fatalf("worker B failed to claim job: %v", err)
+	}
+
+	// 4. Worker A finally finishes and attempts to record its result with stale lease
+	staleAttempt := &model.DeliveryAttempt{
+		JobID:               job.ID,
+		AttemptNumber:       1,
+		StatusCode:          200,
+		ExecutionDurationMs: 250,
+	}
+	err = db.RecordAttempt(ctx, staleAttempt, workerALeaseUntil, model.StatusDelivered, time.Time{}, "", "")
+	if !errors.Is(err, model.ErrLeaseLost) {
+		t.Fatalf("expected ErrLeaseLost for stale worker, got: %v", err)
+	}
+
+	// 5. Verify the job in DB is still IN_FLIGHT owned by Worker B, not overwritten by Worker A!
+	currentJob, _, err := db.GetJobWithEvent(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("failed to get job: %v", err)
+	}
+	if currentJob.Status != model.StatusInFlight {
+		t.Fatalf("expected job status to remain IN_FLIGHT for Worker B, got %s", currentJob.Status)
+	}
+	if currentJob.LeasedUntil == nil || *currentJob.LeasedUntil == *workerALeaseUntil {
+		t.Fatalf("expected job lease to be Worker B's lease, but matched stale Worker A lease")
+	}
+}
+
+func TestReapStaleLeases_PoisonPillMaxAttempts(t *testing.T) {
+	db := newTestDB(t)
+	tenant := createTestTenant(t, db)
+	ctx := context.Background()
+
+	ev := &model.Event{
+		TenantID:       tenant.ID,
+		IdempotencyKey: "poison_pill_test",
+		DestinationURL: "https://example.com/webhook",
+		Payload:        []byte(`{}`),
+	}
+	// Max attempts = 2
+	_, job, _, err := db.IngestEvent(ctx, ev, 2)
+	if err != nil {
+		t.Fatalf("failed to ingest: %v", err)
+	}
+
+	// 1st crash cycle: claim and expire
+	_, _ = db.ClaimJobs(ctx, 1, 50*time.Millisecond, time.Now().UTC())
+	time.Sleep(60 * time.Millisecond)
+	reaped1, err := db.ReapStaleLeases(ctx, time.Now().UTC())
+	if err != nil || reaped1 != 1 {
+		t.Fatalf("cycle 1 reap failed: %v", err)
+	}
+
+	j1, _, _ := db.GetJobWithEvent(ctx, job.ID)
+	if j1.Status != model.StatusRetryPending || j1.AttemptCount != 1 {
+		t.Fatalf("expected StatusRetryPending with attempt_count 1, got status=%s count=%d", j1.Status, j1.AttemptCount)
+	}
+
+	// 2nd crash cycle: claim and expire (reaches max attempts)
+	_, _ = db.ClaimJobs(ctx, 1, 50*time.Millisecond, time.Now().UTC())
+	time.Sleep(60 * time.Millisecond)
+	reaped2, err := db.ReapStaleLeases(ctx, time.Now().UTC())
+	if err != nil || reaped2 != 1 {
+		t.Fatalf("cycle 2 reap failed: %v", err)
+	}
+
+	// Verify transitioned directly to DEAD_LETTER
+	j2, _, _ := db.GetJobWithEvent(ctx, job.ID)
+	if j2.Status != model.StatusDeadLetter {
+		t.Fatalf("expected poison pill job to transition to DEAD_LETTER after max attempts, got: %s", j2.Status)
+	}
+	if j2.AttemptCount != 2 {
+		t.Fatalf("expected attempt_count 2, got %d", j2.AttemptCount)
+	}
+}
+
+func TestIngestEvent_ConcurrentDuplicateRace(t *testing.T) {
+	db := newTestDB(t)
+	tenant := createTestTenant(t, db)
+	ctx := context.Background()
+
+	const concurrency = 10
+	var wg sync.WaitGroup
+	duplicateCount := 0
+	createdCount := 0
+	var mu sync.Mutex
+
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ev := &model.Event{
+				TenantID:       tenant.ID,
+				IdempotencyKey: "race_key_concurrent",
+				DestinationURL: "https://example.com/webhook",
+				Payload:        []byte(`{"concurrent":true}`),
+			}
+			_, _, isDup, err := db.IngestEvent(ctx, ev, 3)
+			if err != nil {
+				t.Errorf("unexpected error on concurrent ingest: %v", err)
+				return
+			}
+			mu.Lock()
+			if isDup {
+				duplicateCount++
+			} else {
+				createdCount++
+			}
+			mu.Unlock()
+		}()
+	}
+
+	wg.Wait()
+
+	if createdCount != 1 {
+		t.Fatalf("expected exactly 1 event created, got %d", createdCount)
+	}
+	if duplicateCount != concurrency-1 {
+		t.Fatalf("expected %d duplicate acknowledgments, got %d", concurrency-1, duplicateCount)
 	}
 }

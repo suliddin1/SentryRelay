@@ -91,8 +91,9 @@ func BenchmarkServer_IngestHTTP(b *testing.B) {
 	}
 
 	srv := server.NewServer(server.Config{
-		DefaultMaxRetry: 3,
-		ReplayTolerance: 5 * time.Minute,
+		DefaultMaxRetry:        3,
+		ReplayTolerance:        5 * time.Minute,
+		AllowLocalDestinations: true,
 	}, db)
 
 	payload := []byte(`{"action":"sync.created","entity_id":"ent_001"}`)

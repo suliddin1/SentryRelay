@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS tenants (
     name TEXT NOT NULL,
     secret TEXT NOT NULL,
     enabled INTEGER NOT NULL DEFAULT 1,
-    created_at DATETIME NOT NULL
+    created_at INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS events (
@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS events (
     destination_url TEXT NOT NULL,
     payload BLOB NOT NULL,
     headers TEXT NOT NULL,
-    created_at DATETIME NOT NULL,
+    created_at INTEGER NOT NULL,
     UNIQUE(tenant_id, idempotency_key)
 );
 
@@ -41,13 +41,13 @@ CREATE TABLE IF NOT EXISTS delivery_jobs (
     status TEXT NOT NULL,
     attempt_count INTEGER NOT NULL DEFAULT 0,
     max_attempts INTEGER NOT NULL DEFAULT 5,
-    next_retry_at DATETIME NOT NULL,
-    leased_at DATETIME,
-    leased_until DATETIME,
+    next_retry_at INTEGER NOT NULL,
+    leased_at INTEGER,
+    leased_until INTEGER,
     last_error_code TEXT,
     last_error_message TEXT,
-    created_at DATETIME NOT NULL,
-    updated_at DATETIME NOT NULL
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_poll ON delivery_jobs(status, next_retry_at);
@@ -60,30 +60,55 @@ CREATE TABLE IF NOT EXISTS delivery_attempts (
     status_code INTEGER NOT NULL,
     execution_duration_ms INTEGER NOT NULL,
     error_message TEXT,
-    created_at DATETIME NOT NULL
+    created_at INTEGER NOT NULL
 );
 `
 
-const TimeFormat = time.RFC3339Nano
-
-func formatTime(t time.Time) string {
-	if t.IsZero() {
-		return ""
-	}
-	return t.UTC().Format(TimeFormat)
-}
-
-// DB wraps a SQLite sql.DB with domain repository operations.
+// DB wraps a SQLite sql.DB with hardened concurrency and domain repository operations.
 type DB struct {
 	db *sql.DB
 }
 
-// Open initializes SQLite, applies WAL mode and concurrency pragmas, and migrates the schema.
+func toEpochMs(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.UTC().UnixMilli()
+}
+
+func fromEpochMs(ms int64) time.Time {
+	if ms == 0 {
+		return time.Time{}
+	}
+	return time.UnixMilli(ms).UTC()
+}
+
+func nullTimeToEpochMs(t *time.Time) interface{} {
+	if t == nil || t.IsZero() {
+		return nil
+	}
+	return t.UTC().UnixMilli()
+}
+
+func epochMsToNullTime(ms sql.NullInt64) *time.Time {
+	if !ms.Valid || ms.Int64 == 0 {
+		return nil
+	}
+	t := time.UnixMilli(ms.Int64).UTC()
+	return &t
+}
+
+// Open initializes SQLite, applies WAL mode and concurrency pragmas, and configures single-writer connection pooling.
 func Open(dsn string) (*DB, error) {
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open sqlite database: %w", err)
 	}
+
+	// Single connection for SQLite avoids multi-connection lock contention and ensures pragmas remain active
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0)
 
 	// Pragmas for WAL mode, busy timeout, and relational integrity
 	pragmas := []string{
@@ -122,7 +147,7 @@ func (d *DB) Ping(ctx context.Context) error {
 // CreateTenant inserts a new tenant publisher.
 func (d *DB) CreateTenant(ctx context.Context, tenant *model.Tenant) error {
 	query := `INSERT INTO tenants (id, name, secret, enabled, created_at) VALUES (?, ?, ?, ?, ?)`
-	_, err := d.db.ExecContext(ctx, query, tenant.ID, tenant.Name, tenant.Secret, tenant.Enabled, formatTime(tenant.CreatedAt))
+	_, err := d.db.ExecContext(ctx, query, tenant.ID, tenant.Name, tenant.Secret, tenant.Enabled, toEpochMs(tenant.CreatedAt))
 	if err != nil {
 		return fmt.Errorf("failed to insert tenant: %w", err)
 	}
@@ -135,8 +160,8 @@ func (d *DB) GetTenant(ctx context.Context, id string) (*model.Tenant, error) {
 	row := d.db.QueryRowContext(ctx, query, id)
 
 	var t model.Tenant
-	var createdAtStr string
-	err := row.Scan(&t.ID, &t.Name, &t.Secret, &t.Enabled, &createdAtStr)
+	var createdAtMs int64
+	err := row.Scan(&t.ID, &t.Name, &t.Secret, &t.Enabled, &createdAtMs)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, model.ErrTenantNotFound
 	}
@@ -144,27 +169,25 @@ func (d *DB) GetTenant(ctx context.Context, id string) (*model.Tenant, error) {
 		return nil, fmt.Errorf("failed to query tenant: %w", err)
 	}
 
-	t.CreatedAt, _ = parseTime(createdAtStr)
+	t.CreatedAt = fromEpochMs(createdAtMs)
 	return &t, nil
 }
 
 // IngestEvent idempotently inserts a webhook event and schedules its initial delivery job.
-// If an event with (tenant_id, idempotency_key) already exists, it returns the existing records
-// and duplicate=true without re-queueing a job.
+// Handles concurrent ingestion races gracefully without throwing 500 on UNIQUE constraint collisions.
 func (d *DB) IngestEvent(ctx context.Context, event *model.Event, maxAttempts int) (*model.Event, *model.DeliveryJob, bool, error) {
-	tx, err := d.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelDefault})
+	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, nil, false, fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer tx.Rollback()
 
-	// Check if already exists for idempotency
+	// 1. Initial check for existing event
 	var existingEventID string
 	err = tx.QueryRowContext(ctx, `SELECT id FROM events WHERE tenant_id = ? AND idempotency_key = ?`,
 		event.TenantID, event.IdempotencyKey).Scan(&existingEventID)
 
 	if err == nil {
-		// Existing event found - fetch event and delivery job
 		existingEv, existingJob, fetchErr := d.getEventAndJobTx(ctx, tx, existingEventID)
 		if fetchErr != nil {
 			return nil, nil, false, fetchErr
@@ -175,7 +198,7 @@ func (d *DB) IngestEvent(ctx context.Context, event *model.Event, maxAttempts in
 		return nil, nil, false, fmt.Errorf("failed to query existing event: %w", err)
 	}
 
-	// Insert new event
+	// 2. Prepare event metadata
 	if event.ID == "" {
 		event.ID = uuid.NewString()
 	}
@@ -192,12 +215,25 @@ func (d *DB) IngestEvent(ctx context.Context, event *model.Event, maxAttempts in
 		INSERT INTO events (id, tenant_id, idempotency_key, destination_url, payload, headers, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)`
 	_, err = tx.ExecContext(ctx, insertEventQuery,
-		event.ID, event.TenantID, event.IdempotencyKey, event.DestinationURL, event.Payload, string(headersJSON), formatTime(event.CreatedAt))
+		event.ID, event.TenantID, event.IdempotencyKey, event.DestinationURL, event.Payload, string(headersJSON), toEpochMs(event.CreatedAt))
+
 	if err != nil {
+		// Handle concurrent insertion race: if unique constraint was violated, fetch existing
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			var raceEventID string
+			if queryErr := tx.QueryRowContext(ctx, `SELECT id FROM events WHERE tenant_id = ? AND idempotency_key = ?`,
+				event.TenantID, event.IdempotencyKey).Scan(&raceEventID); queryErr == nil {
+				existingEv, existingJob, fetchErr := d.getEventAndJobTx(ctx, tx, raceEventID)
+				if fetchErr == nil {
+					_ = tx.Commit()
+					return existingEv, existingJob, true, nil
+				}
+			}
+		}
 		return nil, nil, false, fmt.Errorf("failed to insert event: %w", err)
 	}
 
-	// Create initial delivery job
+	// 3. Create initial delivery job
 	job := &model.DeliveryJob{
 		ID:           uuid.NewString(),
 		EventID:      event.ID,
@@ -213,7 +249,7 @@ func (d *DB) IngestEvent(ctx context.Context, event *model.Event, maxAttempts in
 		INSERT INTO delivery_jobs (id, event_id, status, attempt_count, max_attempts, next_retry_at, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
 	_, err = tx.ExecContext(ctx, insertJobQuery,
-		job.ID, job.EventID, string(job.Status), job.AttemptCount, job.MaxAttempts, formatTime(job.NextRetryAt), formatTime(job.CreatedAt), formatTime(job.UpdatedAt))
+		job.ID, job.EventID, string(job.Status), job.AttemptCount, job.MaxAttempts, toEpochMs(job.NextRetryAt), toEpochMs(job.CreatedAt), toEpochMs(job.UpdatedAt))
 	if err != nil {
 		return nil, nil, false, fmt.Errorf("failed to insert delivery job: %w", err)
 	}
@@ -237,7 +273,7 @@ func (d *DB) ClaimJobs(ctx context.Context, batchSize int, leaseDuration time.Du
 	}
 	defer tx.Rollback()
 
-	// Select eligible jobs: PENDING or RETRY_PENDING where next_retry_at <= now
+	nowMs := toEpochMs(now)
 	query := `
 		SELECT id, event_id, status, attempt_count, max_attempts, next_retry_at, created_at, updated_at
 		FROM delivery_jobs
@@ -245,7 +281,7 @@ func (d *DB) ClaimJobs(ctx context.Context, batchSize int, leaseDuration time.Du
 		ORDER BY next_retry_at ASC
 		LIMIT ?`
 
-	rows, err := tx.QueryContext(ctx, query, string(model.StatusPending), string(model.StatusRetryPending), formatTime(now), batchSize)
+	rows, err := tx.QueryContext(ctx, query, string(model.StatusPending), string(model.StatusRetryPending), nowMs, batchSize)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query claimable jobs: %w", err)
 	}
@@ -256,14 +292,15 @@ func (d *DB) ClaimJobs(ctx context.Context, batchSize int, leaseDuration time.Du
 
 	for rows.Next() {
 		var j model.DeliveryJob
-		var statusStr, nextRetryStr, createdStr, updatedStr string
-		if err := rows.Scan(&j.ID, &j.EventID, &statusStr, &j.AttemptCount, &j.MaxAttempts, &nextRetryStr, &createdStr, &updatedStr); err != nil {
+		var statusStr string
+		var nextRetryMs, createdMs, updatedMs int64
+		if err := rows.Scan(&j.ID, &j.EventID, &statusStr, &j.AttemptCount, &j.MaxAttempts, &nextRetryMs, &createdMs, &updatedMs); err != nil {
 			return nil, fmt.Errorf("failed to scan job: %w", err)
 		}
 		j.Status = model.DeliveryStatus(statusStr)
-		j.NextRetryAt, _ = parseTime(nextRetryStr)
-		j.CreatedAt, _ = parseTime(createdStr)
-		j.UpdatedAt, _ = parseTime(updatedStr)
+		j.NextRetryAt = fromEpochMs(nextRetryMs)
+		j.CreatedAt = fromEpochMs(createdMs)
+		j.UpdatedAt = fromEpochMs(updatedMs)
 
 		jobs = append(jobs, &j)
 		jobIDs = append(jobIDs, j.ID)
@@ -275,8 +312,9 @@ func (d *DB) ClaimJobs(ctx context.Context, batchSize int, leaseDuration time.Du
 
 	leasedUntil := now.Add(leaseDuration).UTC()
 	leasedAt := now.UTC()
+	leasedUntilMs := toEpochMs(leasedUntil)
+	leasedAtMs := toEpochMs(leasedAt)
 
-	// Update claimed jobs to IN_FLIGHT with lease timestamps
 	placeholders := strings.Repeat("?,", len(jobIDs))
 	placeholders = placeholders[:len(placeholders)-1]
 
@@ -285,7 +323,7 @@ func (d *DB) ClaimJobs(ctx context.Context, batchSize int, leaseDuration time.Du
 		SET status = ?, leased_at = ?, leased_until = ?, updated_at = ?
 		WHERE id IN (%s)`, placeholders)
 
-	args := []interface{}{string(model.StatusInFlight), formatTime(leasedAt), formatTime(leasedUntil), formatTime(now)}
+	args := []interface{}{string(model.StatusInFlight), leasedAtMs, leasedUntilMs, nowMs}
 	for _, id := range jobIDs {
 		args = append(args, id)
 	}
@@ -308,7 +346,15 @@ func (d *DB) ClaimJobs(ctx context.Context, batchSize int, leaseDuration time.Du
 	return jobs, nil
 }
 
+// StaleJobInfo represents a job discovered with an expired lease.
+type StaleJobInfo struct {
+	ID           string
+	AttemptCount int
+	MaxAttempts  int
+}
+
 // ReapStaleLeases recovers jobs stuck in IN_FLIGHT whose lease has expired (e.g. crashed workers).
+// It increments attempt_count and creates an attempt log to prevent poison-pill payload loops.
 func (d *DB) ReapStaleLeases(ctx context.Context, now time.Time) (int64, error) {
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -316,40 +362,78 @@ func (d *DB) ReapStaleLeases(ctx context.Context, now time.Time) (int64, error) 
 	}
 	defer tx.Rollback()
 
-	// 1. Move exhausted stale jobs to DEAD_LETTER
-	queryExhausted := `
-		UPDATE delivery_jobs
-		SET status = ?, last_error_code = 'LEASE_TIMEOUT', last_error_message = 'Worker lease expired with attempts exhausted',
-		    leased_at = NULL, leased_until = NULL, updated_at = ?
-		WHERE status = ? AND leased_until < ? AND attempt_count >= max_attempts`
-	resExhausted, err := tx.ExecContext(ctx, queryExhausted, string(model.StatusDeadLetter), formatTime(now), string(model.StatusInFlight), formatTime(now))
-	if err != nil {
-		return 0, fmt.Errorf("failed to dead-letter exhausted stale leases: %w", err)
-	}
-	deadCount, _ := resExhausted.RowsAffected()
+	nowMs := toEpochMs(now)
 
-	// 2. Move remaining stale jobs back to RETRY_PENDING
-	queryRecoverable := `
-		UPDATE delivery_jobs
-		SET status = ?, next_retry_at = ?, last_error_code = 'LEASE_TIMEOUT',
-		    last_error_message = 'Worker lease expired; reclaimed by reaper',
-		    leased_at = NULL, leased_until = NULL, updated_at = ?
-		WHERE status = ? AND leased_until < ?`
-	resRecoverable, err := tx.ExecContext(ctx, queryRecoverable, string(model.StatusRetryPending), formatTime(now), formatTime(now), string(model.StatusInFlight), formatTime(now))
+	// Query all expired in-flight jobs
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id, attempt_count, max_attempts
+		FROM delivery_jobs
+		WHERE status = ? AND leased_until < ?`, string(model.StatusInFlight), nowMs)
 	if err != nil {
-		return 0, fmt.Errorf("failed to reclaim recoverable stale leases: %w", err)
+		return 0, fmt.Errorf("failed to query stale leases: %w", err)
 	}
-	reclaimedCount, _ := resRecoverable.RowsAffected()
+	defer rows.Close()
+
+	var staleJobs []StaleJobInfo
+	for rows.Next() {
+		var s StaleJobInfo
+		if err := rows.Scan(&s.ID, &s.AttemptCount, &s.MaxAttempts); err != nil {
+			return 0, fmt.Errorf("failed to scan stale job: %w", err)
+		}
+		staleJobs = append(staleJobs, s)
+	}
+
+	var reapedCount int64
+	for _, job := range staleJobs {
+		newAttemptCount := job.AttemptCount + 1
+
+		// Log orphaned attempt caused by crash/lease expiration
+		insertAttempt := `
+			INSERT INTO delivery_attempts (id, job_id, attempt_number, status_code, execution_duration_ms, error_message, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?)`
+		_, err := tx.ExecContext(ctx, insertAttempt,
+			uuid.NewString(), job.ID, newAttemptCount, 0, 0, "Worker lease expired or abandoned; reclaimed by reaper", nowMs)
+		if err != nil {
+			return 0, fmt.Errorf("failed to log reaper attempt: %w", err)
+		}
+
+		if newAttemptCount >= job.MaxAttempts {
+			// Max attempts reached -> transition to DEAD_LETTER
+			updateQuery := `
+				UPDATE delivery_jobs
+				SET status = ?, attempt_count = ?, last_error_code = 'LEASE_TIMEOUT',
+				    last_error_message = 'Worker lease expired with attempts exhausted',
+				    leased_at = NULL, leased_until = NULL, updated_at = ?
+				WHERE id = ?`
+			_, err = tx.ExecContext(ctx, updateQuery, string(model.StatusDeadLetter), newAttemptCount, nowMs, job.ID)
+		} else {
+			// Reclaim to RETRY_PENDING
+			updateQuery := `
+				UPDATE delivery_jobs
+				SET status = ?, attempt_count = ?, next_retry_at = ?, last_error_code = 'LEASE_TIMEOUT',
+				    last_error_message = 'Worker lease expired; reclaimed by reaper',
+				    leased_at = NULL, leased_until = NULL, updated_at = ?
+				WHERE id = ?`
+			_, err = tx.ExecContext(ctx, updateQuery, string(model.StatusRetryPending), newAttemptCount, nowMs, nowMs, job.ID)
+		}
+
+		if err != nil {
+			return 0, fmt.Errorf("failed to update stale job %s: %w", job.ID, err)
+		}
+		reapedCount++
+	}
 
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("failed to commit reap transaction: %w", err)
 	}
 
-	return deadCount + reclaimedCount, nil
+	return reapedCount, nil
 }
 
 // RecordAttempt persists an individual delivery attempt and updates the job's lifecycle status.
-func (d *DB) RecordAttempt(ctx context.Context, attempt *model.DeliveryAttempt, nextStatus model.DeliveryStatus, nextRetryAt time.Time, lastErrorCode, lastErrorMessage string) error {
+// Includes lease fencing: if expectedLeaseUntil is provided, verifies that the worker still holds
+// the granted lease. If the lease was lost or expired, returns model.ErrLeaseLost.
+func (d *DB) RecordAttempt(ctx context.Context, attempt *model.DeliveryAttempt, expectedLeaseUntil *time.Time, nextStatus model.DeliveryStatus, nextRetryAt time.Time, lastErrorCode, lastErrorMessage string) error {
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin record attempt transaction: %w", err)
@@ -363,26 +447,62 @@ func (d *DB) RecordAttempt(ctx context.Context, attempt *model.DeliveryAttempt, 
 		attempt.CreatedAt = time.Now().UTC()
 	}
 
+	attemptCreatedAtMs := toEpochMs(attempt.CreatedAt)
+	nowMs := toEpochMs(time.Now().UTC())
+	nextRetryMs := toEpochMs(nextRetryAt)
+
+	// Lease fencing: update only if status is IN_FLIGHT and leased_until matches
+	var updateQuery string
+	var args []interface{}
+
+	if expectedLeaseUntil != nil {
+		expectedLeaseMs := toEpochMs(*expectedLeaseUntil)
+		updateQuery = `
+			UPDATE delivery_jobs
+			SET status = ?, attempt_count = attempt_count + 1, next_retry_at = ?,
+			    leased_at = NULL, leased_until = NULL, last_error_code = ?, last_error_message = ?, updated_at = ?
+			WHERE id = ? AND status = ? AND leased_until = ?`
+		args = []interface{}{
+			string(nextStatus), nextRetryMs, lastErrorCode, lastErrorMessage, nowMs,
+			attempt.JobID, string(model.StatusInFlight), expectedLeaseMs,
+		}
+	} else {
+		updateQuery = `
+			UPDATE delivery_jobs
+			SET status = ?, attempt_count = attempt_count + 1, next_retry_at = ?,
+			    leased_at = NULL, leased_until = NULL, last_error_code = ?, last_error_message = ?, updated_at = ?
+			WHERE id = ?`
+		args = []interface{}{
+			string(nextStatus), nextRetryMs, lastErrorCode, lastErrorMessage, nowMs, attempt.JobID,
+		}
+	}
+
+	res, err := tx.ExecContext(ctx, updateQuery, args...)
+	if err != nil {
+		return fmt.Errorf("failed to update delivery job state: %w", err)
+	}
+
+	rowsAffected, _ := res.RowsAffected()
+	if expectedLeaseUntil != nil && rowsAffected == 0 {
+		// Fencing violation: lease was reclaimed or job was modified
+		attempt.ErrorMessage = fmt.Sprintf("orphaned attempt (lease lost): %s", attempt.ErrorMessage)
+		insertAttempt := `
+			INSERT INTO delivery_attempts (id, job_id, attempt_number, status_code, execution_duration_ms, error_message, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?)`
+		_, _ = tx.ExecContext(ctx, insertAttempt,
+			attempt.ID, attempt.JobID, attempt.AttemptNumber, attempt.StatusCode, attempt.ExecutionDurationMs, attempt.ErrorMessage, attemptCreatedAtMs)
+		_ = tx.Commit()
+		return model.ErrLeaseLost
+	}
+
 	// Insert attempt record
 	insertAttempt := `
 		INSERT INTO delivery_attempts (id, job_id, attempt_number, status_code, execution_duration_ms, error_message, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)`
 	_, err = tx.ExecContext(ctx, insertAttempt,
-		attempt.ID, attempt.JobID, attempt.AttemptNumber, attempt.StatusCode, attempt.ExecutionDurationMs, attempt.ErrorMessage, formatTime(attempt.CreatedAt))
+		attempt.ID, attempt.JobID, attempt.AttemptNumber, attempt.StatusCode, attempt.ExecutionDurationMs, attempt.ErrorMessage, attemptCreatedAtMs)
 	if err != nil {
 		return fmt.Errorf("failed to insert attempt: %w", err)
-	}
-
-	// Update job state
-	updateJob := `
-		UPDATE delivery_jobs
-		SET status = ?, attempt_count = attempt_count + 1, next_retry_at = ?,
-		    leased_at = NULL, leased_until = NULL, last_error_code = ?, last_error_message = ?, updated_at = ?
-		WHERE id = ?`
-	_, err = tx.ExecContext(ctx, updateJob,
-		string(nextStatus), formatTime(nextRetryAt), lastErrorCode, lastErrorMessage, formatTime(time.Now()), attempt.JobID)
-	if err != nil {
-		return fmt.Errorf("failed to update delivery job state: %w", err)
 	}
 
 	return tx.Commit()
@@ -392,7 +512,7 @@ func (d *DB) RecordAttempt(ctx context.Context, attempt *model.DeliveryAttempt, 
 func (d *DB) GetJobWithEvent(ctx context.Context, jobID string) (*model.DeliveryJob, *model.Event, error) {
 	query := `
 		SELECT j.id, j.event_id, j.status, j.attempt_count, j.max_attempts, j.next_retry_at,
-		       j.last_error_code, j.last_error_message, j.created_at, j.updated_at,
+		       j.leased_at, j.leased_until, j.last_error_code, j.last_error_message, j.created_at, j.updated_at,
 		       e.id, e.tenant_id, e.idempotency_key, e.destination_url, e.payload, e.headers, e.created_at
 		FROM delivery_jobs j
 		JOIN events e ON j.event_id = e.id
@@ -402,14 +522,16 @@ func (d *DB) GetJobWithEvent(ctx context.Context, jobID string) (*model.Delivery
 
 	var j model.DeliveryJob
 	var e model.Event
-	var statusStr, nextRetryStr, jCreatedStr, jUpdatedStr string
+	var statusStr string
+	var nextRetryMs, jCreatedMs, jUpdatedMs, eCreatedMs int64
+	var leasedAtMs, leasedUntilMs sql.NullInt64
 	var lastErrCode, lastErrMsg sql.NullString
-	var headersStr, eCreatedStr string
+	var headersStr string
 
 	err := row.Scan(
-		&j.ID, &j.EventID, &statusStr, &j.AttemptCount, &j.MaxAttempts, &nextRetryStr,
-		&lastErrCode, &lastErrMsg, &jCreatedStr, &jUpdatedStr,
-		&e.ID, &e.TenantID, &e.IdempotencyKey, &e.DestinationURL, &e.Payload, &headersStr, &eCreatedStr,
+		&j.ID, &j.EventID, &statusStr, &j.AttemptCount, &j.MaxAttempts, &nextRetryMs,
+		&leasedAtMs, &leasedUntilMs, &lastErrCode, &lastErrMsg, &jCreatedMs, &jUpdatedMs,
+		&e.ID, &e.TenantID, &e.IdempotencyKey, &e.DestinationURL, &e.Payload, &headersStr, &eCreatedMs,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil, model.ErrJobNotFound
@@ -419,9 +541,12 @@ func (d *DB) GetJobWithEvent(ctx context.Context, jobID string) (*model.Delivery
 	}
 
 	j.Status = model.DeliveryStatus(statusStr)
-	j.NextRetryAt, _ = parseTime(nextRetryStr)
-	j.CreatedAt, _ = parseTime(jCreatedStr)
-	j.UpdatedAt, _ = parseTime(jUpdatedStr)
+	j.NextRetryAt = fromEpochMs(nextRetryMs)
+	j.CreatedAt = fromEpochMs(jCreatedMs)
+	j.UpdatedAt = fromEpochMs(jUpdatedMs)
+	j.LeasedAt = epochMsToNullTime(leasedAtMs)
+	j.LeasedUntil = epochMsToNullTime(leasedUntilMs)
+
 	if lastErrCode.Valid {
 		j.LastErrorCode = lastErrCode.String
 	}
@@ -429,7 +554,7 @@ func (d *DB) GetJobWithEvent(ctx context.Context, jobID string) (*model.Delivery
 		j.LastErrorMessage = lastErrMsg.String
 	}
 
-	e.CreatedAt, _ = parseTime(eCreatedStr)
+	e.CreatedAt = fromEpochMs(eCreatedMs)
 	_ = json.Unmarshal([]byte(headersStr), &e.Headers)
 
 	return &j, &e, nil
@@ -457,16 +582,17 @@ func (d *DB) ListDeadLetterJobs(ctx context.Context, limit, offset int) ([]*mode
 	var jobs []*model.DeliveryJob
 	for rows.Next() {
 		var j model.DeliveryJob
-		var statusStr, nextRetryStr, createdStr, updatedStr string
+		var statusStr string
+		var nextRetryMs, createdMs, updatedMs int64
 		var lastErrCode, lastErrMsg sql.NullString
-		if err := rows.Scan(&j.ID, &j.EventID, &statusStr, &j.AttemptCount, &j.MaxAttempts, &nextRetryStr,
-			&lastErrCode, &lastErrMsg, &createdStr, &updatedStr); err != nil {
+		if err := rows.Scan(&j.ID, &j.EventID, &statusStr, &j.AttemptCount, &j.MaxAttempts, &nextRetryMs,
+			&lastErrCode, &lastErrMsg, &createdMs, &updatedMs); err != nil {
 			return nil, fmt.Errorf("failed to scan dead-letter job: %w", err)
 		}
 		j.Status = model.DeliveryStatus(statusStr)
-		j.NextRetryAt, _ = parseTime(nextRetryStr)
-		j.CreatedAt, _ = parseTime(createdStr)
-		j.UpdatedAt, _ = parseTime(updatedStr)
+		j.NextRetryAt = fromEpochMs(nextRetryMs)
+		j.CreatedAt = fromEpochMs(createdMs)
+		j.UpdatedAt = fromEpochMs(updatedMs)
 		if lastErrCode.Valid {
 			j.LastErrorCode = lastErrCode.String
 		}
@@ -480,6 +606,7 @@ func (d *DB) ListDeadLetterJobs(ctx context.Context, limit, offset int) ([]*mode
 
 // ReplayDeadLetterJob resets a dead-lettered job to PENDING so it will be retried.
 func (d *DB) ReplayDeadLetterJob(ctx context.Context, jobID string, now time.Time) error {
+	nowMs := toEpochMs(now)
 	query := `
 		UPDATE delivery_jobs
 		SET status = ?, attempt_count = 0, next_retry_at = ?,
@@ -487,7 +614,7 @@ func (d *DB) ReplayDeadLetterJob(ctx context.Context, jobID string, now time.Tim
 		    leased_at = NULL, leased_until = NULL, updated_at = ?
 		WHERE id = ? AND status = ?`
 
-	res, err := d.db.ExecContext(ctx, query, string(model.StatusPending), formatTime(now), formatTime(now), jobID, string(model.StatusDeadLetter))
+	res, err := d.db.ExecContext(ctx, query, string(model.StatusPending), nowMs, nowMs, jobID, string(model.StatusDeadLetter))
 	if err != nil {
 		return fmt.Errorf("failed to replay dead-letter job: %w", err)
 	}
@@ -500,47 +627,32 @@ func (d *DB) ReplayDeadLetterJob(ctx context.Context, jobID string, now time.Tim
 
 func (d *DB) getEventAndJobTx(ctx context.Context, tx *sql.Tx, eventID string) (*model.Event, *model.DeliveryJob, error) {
 	var ev model.Event
-	var headersStr, evCreatedStr string
+	var headersStr string
+	var evCreatedMs int64
 	err := tx.QueryRowContext(ctx, `
 		SELECT id, tenant_id, idempotency_key, destination_url, payload, headers, created_at
 		FROM events WHERE id = ?`, eventID).Scan(
-		&ev.ID, &ev.TenantID, &ev.IdempotencyKey, &ev.DestinationURL, &ev.Payload, &headersStr, &evCreatedStr)
+		&ev.ID, &ev.TenantID, &ev.IdempotencyKey, &ev.DestinationURL, &ev.Payload, &headersStr, &evCreatedMs)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to query event: %w", err)
 	}
-	ev.CreatedAt, _ = parseTime(evCreatedStr)
+	ev.CreatedAt = fromEpochMs(evCreatedMs)
 	_ = json.Unmarshal([]byte(headersStr), &ev.Headers)
 
 	var job model.DeliveryJob
-	var statusStr, nextRetryStr, jobCreatedStr, jobUpdatedStr string
+	var statusStr string
+	var nextRetryMs, jobCreatedMs, jobUpdatedMs int64
 	err = tx.QueryRowContext(ctx, `
 		SELECT id, event_id, status, attempt_count, max_attempts, next_retry_at, created_at, updated_at
 		FROM delivery_jobs WHERE event_id = ?`, eventID).Scan(
-		&job.ID, &job.EventID, &statusStr, &job.AttemptCount, &job.MaxAttempts, &nextRetryStr, &jobCreatedStr, &jobUpdatedStr)
+		&job.ID, &job.EventID, &statusStr, &job.AttemptCount, &job.MaxAttempts, &nextRetryMs, &jobCreatedMs, &jobUpdatedMs)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to query delivery job: %w", err)
 	}
 	job.Status = model.DeliveryStatus(statusStr)
-	job.NextRetryAt, _ = parseTime(nextRetryStr)
-	job.CreatedAt, _ = parseTime(jobCreatedStr)
-	job.UpdatedAt, _ = parseTime(jobUpdatedStr)
+	job.NextRetryAt = fromEpochMs(nextRetryMs)
+	job.CreatedAt = fromEpochMs(jobCreatedMs)
+	job.UpdatedAt = fromEpochMs(jobUpdatedMs)
 
 	return &ev, &job, nil
-}
-
-func parseTime(s string) (time.Time, error) {
-	formats := []string{
-		time.RFC3339Nano,
-		time.RFC3339,
-		"2006-01-02 15:04:05.999999999-07:00",
-		"2006-01-02 15:04:05.999999999",
-		"2006-01-02 15:04:05",
-		"2006-01-02T15:04:05Z",
-	}
-	for _, f := range formats {
-		if t, err := time.Parse(f, s); err == nil {
-			return t, nil
-		}
-	}
-	return time.Time{}, fmt.Errorf("unable to parse time string: %s", s)
 }

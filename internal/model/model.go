@@ -24,6 +24,7 @@ var (
 	ErrTimestampOutOfRange = errors.New("timestamp outside acceptable replay window")
 	ErrTenantNotFound      = errors.New("tenant not found")
 	ErrTenantDisabled      = errors.New("tenant disabled")
+	ErrLeaseLost           = errors.New("worker lease lost or expired: cannot update job state")
 )
 
 // Tenant represents an authorized webhook publisher.

@@ -43,17 +43,19 @@ flowchart TD
 ## Key Guarantees & Invariants
 
 1. **Durable Persistence Before Acknowledgment**:
-   Webhooks are durably written to SQLite in Write-Ahead Logging (`WAL`) mode within an ACID transaction before responding with `202 Accepted`. If the process crashes immediately after receiving a request, no accepted event is lost.
-2. **Replay Protection & Cryptographic Non-Repudiation**:
+   Webhooks are durably written to SQLite in Write-Ahead Logging (`WAL`) mode within an ACID transaction before responding with `202 Accepted`. Connection pooling is configured to `SetMaxOpenConns(1)` with `synchronous = NORMAL` and `busy_timeout = 5000` to prevent lock contention deadlocks and ensure pragmas remain permanently active across all operations.
+2. **Deterministic Integer Epoch Timestamps**:
+   All timestamps (`created_at`, `updated_at`, `next_retry_at`, `leased_until`) are stored as 64-bit signed integers representing Unix epoch milliseconds (`int64`), preventing string-based comparison edge cases (such as RFC3339 trailing zero truncation where `'Z' > '.'`).
+3. **Replay Protection & Cryptographic Non-Repudiation**:
    Every incoming webhook is verified using HMAC-SHA256 signatures evaluated with constant-time equality comparisons (`crypto/subtle.ConstantTimeCompare`). Timestamps drifting beyond a configurable tolerance window (default 5 minutes) are rejected.
-3. **Idempotent Ingestion**:
-   Producers supply an `X-SentryRelay-Idempotency-Key`. Duplicate events for the same tenant return the existing event identifier without enqueuing redundant delivery attempts.
-4. **Crash-Resilient Lease Architecture**:
-   Workers claim batches of jobs using visibility timeouts (`leased_until = now + lease_duration`). If a worker or host process terminates abruptly mid-flight, a background Lease Reaper detects expired leases on restart and returns abandoned jobs to `RETRY_PENDING` (or DLQ if maximum attempts are exceeded).
-5. **Adaptive Backoff with Full Jitter**:
-   Transient downstream failures (HTTP 429, 5xx, timeouts, network resets) trigger exponential backoff with full jitter to avoid thundering herd spikes against downstream endpoints.
-6. **Dead-Letter Queue (DLQ) & Operator Replay**:
-   Permanent client errors (e.g. HTTP 400, 401, 404, 422) or events exceeding maximum retry attempts are isolated into a Dead-Letter Queue. Operators can inspect failed payloads and replay them via REST API once downstream systems are restored.
+4. **Race-Free Idempotent Ingestion**:
+   Producers supply an `X-SentryRelay-Idempotency-Key`. Ingestion handles concurrent duplicate submission races safely, returning the existing event identifier without enqueuing redundant delivery attempts or failing with 500 errors.
+5. **Worker Lease Fencing & Poison-Pill Mitigation**:
+   Workers claim batches of jobs using visibility timeouts (`leased_until = now + lease_duration`). Delivery completion checks lease fencing: a worker whose lease expired cannot overwrite newer job states (`ErrLeaseLost`). The background Lease Reaper reclaims abandoned jobs, increments `attempt_count`, and routes poison-pill payloads to `DEAD_LETTER` once `max_attempts` is reached. Stale in-memory jobs are dropped before outbound dispatch.
+6. **Outbound SSRF Defense**:
+   All webhook destinations are checked against loopback, RFC1918 private networks, and cloud metadata endpoints (`169.254.169.254`) with DNS resolution validation, protecting internal networks from unauthorized access.
+7. **Adaptive Backoff with Full Jitter & DLQ Replay**:
+   Transient downstream failures (HTTP 429, 5xx, timeouts, network resets) trigger exponential backoff with full jitter to avoid thundering herd spikes. Permanent client errors (e.g. HTTP 400, 401, 404, 422) or events exceeding maximum retry attempts are isolated into a Dead-Letter Queue (DLQ) with REST replay capability (`POST /v1/dlq/:id/replay`).
 
 ---
 

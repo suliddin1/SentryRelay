@@ -29,6 +29,7 @@ func main() {
 		leaseDuration  = flag.Duration("lease-duration", 30*time.Second, "Visibility lease duration for in-flight jobs")
 		reaperInterval = flag.Duration("reaper-interval", 5*time.Second, "Interval for stale lease recovery reaper")
 		seedDevTenant  = flag.Bool("seed-dev-tenant", false, "Seed a default development tenant if absent")
+		allowLocalDest = flag.Bool("allow-local-destinations", false, "Allow delivery to localhost/loopback destinations (dev/test only)")
 	)
 	flag.Parse()
 
@@ -69,8 +70,9 @@ func main() {
 
 	// Ingestion HTTP Server
 	srvConfig := server.Config{
-		DefaultMaxRetry: 5,
-		ReplayTolerance: 5 * time.Minute,
+		DefaultMaxRetry:        5,
+		ReplayTolerance:        5 * time.Minute,
+		AllowLocalDestinations: *allowLocalDest || *seedDevTenant,
 	}
 	srv := server.NewServer(srvConfig, db)
 
