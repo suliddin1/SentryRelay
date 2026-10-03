@@ -4,7 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -17,6 +17,7 @@ import (
 	"github.com/suliddin1/SentryRelay/internal/retry"
 	"github.com/suliddin1/SentryRelay/internal/server"
 	"github.com/suliddin1/SentryRelay/internal/storage/sqlite"
+	"github.com/suliddin1/SentryRelay/internal/telemetry"
 	"github.com/suliddin1/SentryRelay/internal/worker"
 )
 
@@ -33,11 +34,16 @@ func main() {
 	)
 	flag.Parse()
 
-	log.Printf("[INFO] Initializing SentryRelay (Storage: %s, Workers: %d)...", *dbPath, *numWorkers)
+	// Initialize structured JSON logging
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	slog.SetDefault(logger)
+
+	slog.Info("Initializing SentryRelay", "storage", *dbPath, "workers", *numWorkers)
 
 	db, err := sqlite.Open(*dbPath)
 	if err != nil {
-		log.Fatalf("[FATAL] Failed to initialize SQLite storage: %v", err)
+		slog.Error("Failed to initialize SQLite storage", "error", err)
+		os.Exit(1)
 	}
 	defer db.Close()
 
@@ -63,10 +69,14 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Start metrics collector for queue depth
+	telemetry.StartMetricsCollector(ctx, db, 5*time.Second)
+
 	if err := pool.Start(ctx); err != nil {
-		log.Fatalf("[FATAL] Failed to start worker pool: %v", err)
+		slog.Error("Failed to start worker pool", "error", err)
+		os.Exit(1)
 	}
-	log.Printf("[INFO] Worker pool and lease reaper started successfully")
+	slog.Info("Worker pool and lease reaper started successfully")
 
 	// Ingestion HTTP Server
 	srvConfig := server.Config{
@@ -86,9 +96,10 @@ func main() {
 
 	// Background HTTP server listener
 	go func() {
-		log.Printf("[INFO] SentryRelay HTTP server listening on http://localhost:%d", *port)
+		slog.Info(fmt.Sprintf("SentryRelay HTTP server listening on http://localhost:%d", *port))
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("[FATAL] HTTP server error: %v", err)
+			slog.Error("HTTP server error", "error", err)
+			os.Exit(1)
 		}
 	}()
 
@@ -96,17 +107,17 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	sig := <-sigChan
-	log.Printf("[INFO] Received signal %v, commencing graceful shutdown...", sig)
+	slog.Info("Received signal, commencing graceful shutdown", "signal", sig)
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
-		log.Printf("[WARN] HTTP server shutdown error: %v", err)
+		slog.Warn("HTTP server shutdown error", "error", err)
 	}
 
 	pool.Stop()
-	log.Printf("[INFO] SentryRelay terminated cleanly.")
+	slog.Info("SentryRelay terminated cleanly.")
 }
 
 func seedTenant(db *sqlite.DB) {
@@ -126,11 +137,9 @@ func seedTenant(db *sqlite.DB) {
 		CreatedAt: time.Now().UTC(),
 	}
 	if err := db.CreateTenant(ctx, tenant); err != nil {
-		log.Printf("[WARN] Could not seed dev tenant: %v", err)
+		slog.Warn("Could not seed dev tenant", "error", err)
 		return
 	}
 
-	log.Printf("[INFO] Seeded development tenant:")
-	log.Printf("       Tenant ID: %s", tenant.ID)
-	log.Printf("       Secret:    %s", tenant.Secret)
+	slog.Info("Seeded development tenant", "tenant_id", tenant.ID, "secret", tenant.Secret)
 }

@@ -656,3 +656,24 @@ func (d *DB) getEventAndJobTx(ctx context.Context, tx *sql.Tx, eventID string) (
 
 	return &ev, &job, nil
 }
+
+// GetQueueDepths returns the count of jobs by status.
+func (d *DB) GetQueueDepths(ctx context.Context) (map[string]int, error) {
+	query := `SELECT status, COUNT(*) FROM delivery_jobs GROUP BY status`
+	rows, err := d.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query queue depths: %w", err)
+	}
+	defer rows.Close()
+
+	counts := make(map[string]int)
+	for rows.Next() {
+		var status string
+		var count int
+		if err := rows.Scan(&status, &count); err != nil {
+			return nil, fmt.Errorf("failed to scan queue depth: %w", err)
+		}
+		counts[status] = count
+	}
+	return counts, nil
+}

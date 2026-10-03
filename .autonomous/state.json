@@ -1,7 +1,7 @@
 {
   "project_name": "SentryRelay",
   "repository": "https://github.com/suliddin1/SentryRelay",
-  "current_phase": "Phase 2: Observability, Metrics & Telemetry",
+  "current_phase": "Phase 3: Rate Limiting & Tenant Protection",
   "current_session_date": "2026-10-03",
   "last_completed_session_date": "2026-10-03",
   "capabilities_completed": [
@@ -26,13 +26,15 @@
     "Poison-pill mitigation in lease reaper with attempt accounting and DLQ routing on repeated crashes",
     "Concurrent duplicate ingestion race handling resolving unique constraint collisions gracefully",
     "In-memory queue lease freshness validation discarding expired jobs before delivery",
-    "Outbound SSRF protection blocking loopback, RFC1918 private IPs, and cloud metadata (169.254.169.254)"
+    "Outbound SSRF protection blocking loopback, RFC1918 private IPs, and cloud metadata (169.254.169.254)",
+    "Structured JSON logging via log/slog with trace_id correlation",
+    "Prometheus metrics endpoint (/metrics) for queue depth, attempt latencies, and transition counters",
+    "Health and readiness probes (/healthz, /readyz)"
   ],
   "active_priorities": [
-    "Phase 2: Prometheus metrics endpoint (/metrics) for queue depth, attempt latencies, and worker utilization",
-    "Phase 2: Structured JSON logging with trace correlation",
     "Phase 3: Per-tenant rate limiting and destination backpressure",
-    "Phase 4: Dedicated operational CLI (sentryrelay-ctl) for headless queue and DLQ triage"
+    "Phase 4: Dedicated operational CLI (sentryrelay-ctl) for headless queue and DLQ triage",
+    "Phase 5: Fault Injection & Chaos Testing"
   ],
   "known_technical_debt": [],
   "metrics_and_benchmarks": {

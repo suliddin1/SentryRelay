@@ -43,14 +43,14 @@
 - [x] Outbound SSRF destination URL validation (reject loopback, private RFC1918, link-local metadata addresses unless permitted)
 - [x] Update ADR-0002, ADR-0003, and README to reflect hardened guarantees
 
-## Phase 2: Observability, Metrics & Telemetry
-- [ ] Prometheus metrics endpoint (`/metrics`):
+## Phase 2: Observability, Metrics & Telemetry (Completed)
+- [x] Prometheus metrics endpoint (`/metrics`):
   - Ingestion throughput and latency histogram
   - Queue depth gauge broken down by status (`PENDING`, `IN_FLIGHT`, `RETRY_PENDING`, `DEAD_LETTER`)
   - Delivery attempt latency histogram
   - Retry distribution and DLQ transition counters
-- [ ] Structured JSON logging (`slog`) with contextual trace/event IDs
-- [ ] Refined health check and readiness probes (`/healthz`, `/readyz`)
+- [x] Structured JSON logging (`slog`) with contextual trace/event IDs
+- [x] Refined health check and readiness probes (`/healthz`, `/readyz`)
 
 ## Phase 3: Rate Limiting & Tenant Protection
 - [ ] Per-tenant ingestion rate limits (token bucket)

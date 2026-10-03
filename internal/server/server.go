@@ -10,9 +10,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/suliddin1/SentryRelay/internal/model"
 	"github.com/suliddin1/SentryRelay/internal/security"
 	"github.com/suliddin1/SentryRelay/internal/storage/sqlite"
+	"github.com/suliddin1/SentryRelay/internal/telemetry"
 )
 
 // Server coordinates HTTP ingestion and operational diagnostics.
@@ -60,10 +62,11 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
-	s.mux.HandleFunc("POST /v1/ingest", s.handleIngest)
+	s.mux.Handle("POST /v1/ingest", telemetry.Middleware(http.HandlerFunc(s.handleIngest), "ingest"))
 	s.mux.HandleFunc("GET /v1/jobs/{id}", s.handleGetJob)
 	s.mux.HandleFunc("GET /v1/dlq", s.handleListDLQ)
 	s.mux.HandleFunc("POST /v1/dlq/{id}/replay", s.handleReplayDLQ)
+	s.mux.Handle("GET /metrics", promhttp.Handler())
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {

@@ -95,3 +95,33 @@
 - **Benchmarks**:
   - `BenchmarkStorage_IngestEvent`: Latency dropped to 142 µs/op (down from 151 µs/op) and allocations reduced to 98 allocs/op (down from 103 allocs/op).
 
+
+---
+
+## Session 2026-10-03 (Phase 2): Observability, Metrics & Telemetry
+- **Date**: 2026-10-03
+- **Objective**: Introduce structured logging (slog) with trace IDs and a Prometheus metrics endpoint to expose system utilization, queue depths, and latencies.
+- **Status**: Completed Successfully
+
+### Work Completed:
+1. **Prometheus Telemetry**:
+   - Pulled `github.com/prometheus/client_golang/prometheus`.
+   - Exposed `GET /metrics` for scraping via `promhttp.Handler()`.
+   - Created gauges and counters in `internal/telemetry`:
+     - `sentryrelay_ingest_duration_seconds` (Histogram): records webhook ingestion latency by HTTP status code.
+     - `sentryrelay_delivery_duration_seconds` (Histogram): records outbound HTTP delivery latency by response status.
+     - `sentryrelay_queue_depth` (Gauge): live job counts categorized by `PENDING`, `IN_FLIGHT`, `RETRY_PENDING`, `DEAD_LETTER`.
+     - `sentryrelay_dlq_transitions_total` (Counter): tracks failures reaching `DEAD_LETTER` state.
+     - `sentryrelay_retries_total` (Counter): tracks transient failures scheduling retries.
+2. **Background Metrics Collector**:
+   - Added `GetQueueDepths` in SQLite repository to calculate grouping counts.
+   - Initialized a background goroutine via `telemetry.StartMetricsCollector(ctx, db, 5s)` to periodically update queue depth gauges without blocking hot paths.
+3. **Structured JSON Logging & Trace Correlation**:
+   - Replaced standard `log` output across `main`, `worker`, and HTTP middlewares with `log/slog` enforcing structured JSON log bodies (`slog.NewJSONHandler`).
+   - Implemented `telemetry.Middleware` that wraps ingestion requests, injects or extracts `X-Request-ID`, and logs structured access logs containing method, path, status, and duration alongside metric recording.
+
+### Verification Evidence:
+- **Test Suite (`go test -v -race ./...`)**:
+  - All 20 tests across all packages passed successfully with data race checking active.
+  - Tests properly logged with JSON formatted logs instead of raw strings.
+- **Build**: `cmd/sentryrelay` compiled successfully with new external prometheus dependencies.

@@ -4,7 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
+	"strconv"
 	"sync"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/suliddin1/SentryRelay/internal/model"
 	"github.com/suliddin1/SentryRelay/internal/retry"
 	"github.com/suliddin1/SentryRelay/internal/storage/sqlite"
+	"github.com/suliddin1/SentryRelay/internal/telemetry"
 )
 
 // Config configures the worker pool and lease reaper.
@@ -183,7 +185,11 @@ func (p *Pool) processJob(ctx context.Context, job *model.DeliveryJob) {
 	}
 
 	// 2. Deliver payload to destination
+	start := time.Now()
 	res := p.client.Deliver(ctx, jobWithEvent, event)
+	duration := time.Since(start)
+
+	telemetry.DeliveryLatency.WithLabelValues(strconv.Itoa(res.Attempt.StatusCode)).Observe(duration.Seconds())
 
 	// 3. Determine next state based on classification and attempt limit
 	var nextStatus model.DeliveryStatus
@@ -198,16 +204,19 @@ func (p *Pool) processJob(ctx context.Context, job *model.DeliveryJob) {
 
 	case retry.ClassificationPermanent:
 		nextStatus = model.StatusDeadLetter
+		telemetry.DLQTransitions.Inc()
 		errCode = "PERMANENT_ERROR"
 		errMsg = res.Attempt.ErrorMessage
 
 	case retry.ClassificationTransient:
 		if attemptNum >= jobWithEvent.MaxAttempts {
 			nextStatus = model.StatusDeadLetter
+			telemetry.DLQTransitions.Inc()
 			errCode = "MAX_ATTEMPTS_EXCEEDED"
 			errMsg = fmt.Sprintf("Exceeded max retry attempts (%d): %s", jobWithEvent.MaxAttempts, res.Attempt.ErrorMessage)
 		} else {
 			nextStatus = model.StatusRetryPending
+			telemetry.Retries.Inc()
 			backoff := p.cfg.RetryPolicy.BackoffDuration(attemptNum)
 			nextRetryAt = time.Now().UTC().Add(backoff)
 			errCode = "TRANSIENT_ERROR"
@@ -219,10 +228,10 @@ func (p *Pool) processJob(ctx context.Context, job *model.DeliveryJob) {
 	err = p.db.RecordAttempt(ctx, res.Attempt, jobWithEvent.LeasedUntil, nextStatus, nextRetryAt, errCode, errMsg)
 	if err != nil {
 		if errors.Is(err, model.ErrLeaseLost) {
-			log.Printf("[WARN] Delivery attempt for job %s completed after lease expiration; state transition discarded", job.ID)
+			slog.Warn("Delivery attempt completed after lease expiration; state transition discarded", "job_id", job.ID)
 			return
 		}
-		log.Printf("[ERROR] Failed to record delivery attempt for job %s: %v", job.ID, err)
+		slog.Error("Failed to record delivery attempt", "job_id", job.ID, "error", err)
 	}
 }
 
