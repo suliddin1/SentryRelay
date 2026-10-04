@@ -64,7 +64,7 @@
   - `dlq list`: List dead-lettered events with failure diagnostics
   - `dlq replay <event_id>`: Replay dead-lettered event
 
-## Phase 5: Fault Injection & Chaos Testing
-- [ ] Fault injection framework simulating random process exits, network timeouts, and database busy locks
-- [ ] Long-running stress testing under high concurrency
-- [ ] Data integrity verification checks
+## Phase 5: Fault Injection & Chaos Testing (Completed)
+- [x] Fault injection framework simulating random process exits, network timeouts, and database busy locks
+- [x] Long-running stress testing under high concurrency
+- [x] Data integrity verification checks

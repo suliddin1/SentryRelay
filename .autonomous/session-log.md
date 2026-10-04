@@ -176,3 +176,27 @@
 ### Verification Evidence:
 - **Build**: `cmd/sentryrelay-ctl` built successfully.
 - **Tests**: `go test -v -race ./...` passed with zero errors, confirming no regressions in the core `server` package.
+
+---
+
+## Session 2026-10-04 (Phase 5): Fault Injection & Chaos Testing
+- **Date**: 2026-10-04
+- **Objective**: Develop a comprehensive chaos testing suite simulating hostile conditions, node crashes, connection drops, and HTTP timeout limits under high concurrency to guarantee data integrity.
+- **Status**: Completed Successfully
+
+### Work Completed:
+1. **Fault Injection Framework (`test/chaos/chaos_test.go`)**:
+   - Created a malicious mock destination server returning a mix of success (200), transient rate limits (429), permanent errors (400), internal failures (503), slow responses (timeout triggers), and sudden connection drops (TCP reset).
+   - Spawned 1,000 highly concurrent requests towards the SentryRelay ingestion endpoint, bounded by local worker limiters to avoid Windows `connectex` ephemeral port exhaustion.
+   - Designed dynamic worker pool crashes, forcing the `worker.Pool` to close forcefully midway through batch processing, simulating sudden SentryRelay ungraceful shutdowns and subsequent restarts.
+2. **Data Integrity & Quiescence Checks**:
+   - Implemented rigorous verification of system quiescence (`PENDING`, `IN_FLIGHT`, `RETRY_PENDING` dropping exactly to zero).
+   - Validated that exactly 1,000 jobs eventually settled into either terminal `DELIVERED` state (success) or `DEAD_LETTER` state (permanent failure or retry exhaustion).
+   - Successfully proved that abandoned `IN_FLIGHT` leases caused by simulated crashes were detected, recovered, and re-enqueued by the database lease reaper without losing a single payload.
+
+### Verification Evidence:
+- **Test Suite (`go test -v -race ./test/chaos/...`)**:
+  - `TestChaos_ResilienceAndDataIntegrity`: Successfully processed all 1,000 chaotic events, reaching system quiescence in ~9,000ms.
+  - Asserted `Total Jobs == 1000` (zero dropped events).
+  - Validated that system cleanly handled database fencing (`WARN Delivery attempt completed after lease expiration; state transition discarded`), avoiding corrupted state.
+  - Passed flawlessly with Go's `race` detector enabled, verifying concurrency safety.

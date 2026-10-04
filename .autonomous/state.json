@@ -33,10 +33,11 @@
     "Per-tenant ingestion rate limiting (in-memory token bucket via x/time/rate)",
     "Destination concurrency limiting (in-memory channel-based semaphore per host)",
     "Ingestion backpressure via atomic queue depth threshold checks",
-    "Dedicated operational CLI (sentryrelay-ctl) for headless triage and API integration (status, queue inspect, dlq list, dlq replay)"
+    "Dedicated operational CLI (sentryrelay-ctl) for headless triage and API integration (status, queue inspect, dlq list, dlq replay)",
+    "Rigorous end-to-end chaos testing validating crash resilience, idempotency, and data-loss prevention under heavy load (1000 concurrent reqs)"
   ],
   "active_priorities": [
-    "Phase 5: Fault Injection & Chaos Testing"
+    "Project stabilization and README updates"
   ],
   "known_technical_debt": [],
   "metrics_and_benchmarks": {
