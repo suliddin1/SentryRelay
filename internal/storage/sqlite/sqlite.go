@@ -678,6 +678,20 @@ func (d *DB) GetQueueDepths(ctx context.Context) (map[string]int, error) {
 	return counts, nil
 }
 
+// CountJobs is a test helper that returns the absolute total of delivery_jobs.
+func (d *DB) CountJobs(ctx context.Context) int {
+	var c int
+	d.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM delivery_jobs").Scan(&c)
+	return c
+}
+
+// CountEvents is a test helper that returns the absolute total of events.
+func (d *DB) CountEvents(ctx context.Context) int {
+	var c int
+	d.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM events").Scan(&c)
+	return c
+}
+
 // ListQueueJobs retrieves active jobs (PENDING, IN_FLIGHT, RETRY_PENDING) for operational inspection.
 func (d *DB) ListQueueJobs(ctx context.Context, limit, offset int) ([]*model.DeliveryJob, error) {
 	if limit <= 0 {
