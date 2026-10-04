@@ -75,11 +75,11 @@
 - [x] Audit Queue Lease Dispatcher and In-flight Reaper logic
 - [x] Audit Worker Pool outbound HTTP client, timeouts, and state classification
 
-## Audit Phase 2: Review Data Integrity & Persistence Hardening
-- [ ] Audit SQLite connection pooling pragmas, transactions, and isolation
-- [ ] Audit integer epoch timestamps and boundary checks
-- [ ] Audit worker lease fencing in RecordAttempt (stale lease rejections)
-- [ ] Audit duplicate ingestion constraint error handling
+## Audit Phase 2: Review Data Integrity & Persistence Hardening (Completed)
+- [x] Audit SQLite connection pooling pragmas, transactions, and isolation
+- [x] Audit integer epoch timestamps and boundary checks
+- [x] Audit worker lease fencing in RecordAttempt (stale lease rejections)
+- [x] Audit duplicate ingestion constraint error handling
 
 ## Audit Phase 3: Review Observability, Metrics & Telemetry
 - [ ] Audit Prometheus metrics registration, collectors, and HTTP middleware
