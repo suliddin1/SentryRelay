@@ -21,7 +21,6 @@ type Policy struct {
 	MaxInterval     time.Duration
 	Multiplier      float64
 	MaxAttempts     int
-	RandSource      *rand.Rand
 }
 
 // DefaultPolicy returns a production-ready retry policy.
@@ -31,7 +30,6 @@ func DefaultPolicy() Policy {
 		MaxInterval:     30 * time.Second,
 		Multiplier:      2.0,
 		MaxAttempts:     5,
-		RandSource:      rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 }
 
@@ -82,8 +80,10 @@ func (p Policy) BackoffDuration(attempt int) time.Duration {
 	}
 
 	// Apply Full Jitter: uniform random value in [0, interval]
-	if p.RandSource != nil {
-		jittered := p.RandSource.Int63n(int64(interval) + 1)
+	if interval > 0 {
+		// global math/rand functions are safe for concurrent use in Go 1.20+
+		// Note: p.RandSource is removed/ignored here to avoid custom PRNG data races
+		jittered := rand.Int63n(int64(interval) + 1)
 		return time.Duration(jittered)
 	}
 

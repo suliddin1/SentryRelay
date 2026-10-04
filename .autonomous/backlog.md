@@ -68,3 +68,27 @@
 - [x] Fault injection framework simulating random process exits, network timeouts, and database busy locks
 - [x] Long-running stress testing under high concurrency
 - [x] Data integrity verification checks
+
+## Audit Phase 1: Review Core Foundation & End-to-End Delivery (Completed)
+- [x] Audit SQLite database logic, connection handling, and schema
+- [x] Audit Ingestion HTTP handler, HMAC verification, and idempotency logic
+- [x] Audit Queue Lease Dispatcher and In-flight Reaper logic
+- [x] Audit Worker Pool outbound HTTP client, timeouts, and state classification
+
+## Audit Phase 2: Review Data Integrity & Persistence Hardening
+- [ ] Audit SQLite connection pooling pragmas, transactions, and isolation
+- [ ] Audit integer epoch timestamps and boundary checks
+- [ ] Audit worker lease fencing in RecordAttempt (stale lease rejections)
+- [ ] Audit duplicate ingestion constraint error handling
+
+## Audit Phase 3: Review Observability, Metrics & Telemetry
+- [ ] Audit Prometheus metrics registration, collectors, and HTTP middleware
+- [ ] Audit JSON structured logging and context propagation
+
+## Audit Phase 4: Review Rate Limiting, Tenant Protection & CLI
+- [ ] Audit token bucket tenant rate limits and concurrency semaphores
+- [ ] Audit TotalQueueDepth backpressure logic and atomic counters
+- [ ] Audit sentryrelay-ctl operational endpoints
+
+## Audit Phase 5: Review Fault Injection & Chaos Testing
+- [ ] Audit chaos_test.go constraints, HTTP connection pools, and quiescence logic

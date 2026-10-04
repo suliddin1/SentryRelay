@@ -2,7 +2,6 @@ package retry
 
 import (
 	"errors"
-	"math/rand"
 	"net/http"
 	"testing"
 	"time"
@@ -41,14 +40,11 @@ func TestClassifyResponse(t *testing.T) {
 }
 
 func TestBackoffDuration(t *testing.T) {
-	// Deterministic random source for testing
-	source := rand.New(rand.NewSource(42))
 	p := Policy{
 		InitialInterval: 100 * time.Millisecond,
 		MaxInterval:     1600 * time.Millisecond,
 		Multiplier:      2.0,
 		MaxAttempts:     5,
-		RandSource:      source,
 	}
 
 	for attempt := 1; attempt <= 10; attempt++ {
