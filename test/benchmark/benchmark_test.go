@@ -3,6 +3,8 @@ package benchmark
 import (
 	"bytes"
 	"context"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -94,6 +96,9 @@ func BenchmarkServer_IngestHTTP(b *testing.B) {
 		DefaultMaxRetry:        3,
 		ReplayTolerance:        5 * time.Minute,
 		AllowLocalDestinations: true,
+		TenantRateLimit:        1000000,
+		TenantBurstLimit:       2000000,
+		MaxQueueDepth:          5000000,
 	}, db)
 
 	payload := []byte(`{"action":"sync.created","entity_id":"ent_001"}`)
@@ -101,6 +106,8 @@ func BenchmarkServer_IngestHTTP(b *testing.B) {
 	ts := now.Unix()
 	tsStr := strconv.FormatInt(ts, 10)
 	sig := security.Sign(tenant.Secret, ts, payload)
+
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	handler := srv.Handler()
 

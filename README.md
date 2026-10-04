@@ -65,9 +65,31 @@ Benchmarked on an Intel Core i7-13650HX (Windows amd64, pure Go SQLite):
 
 | Operation | Throughput | Latency | Memory Allocs |
 | :--- | :--- | :--- | :--- |
-| **HMAC Sign & Constant-Time Verify** | **~905,000 ops/sec** | `1,104 ns/op` | 24 allocs/op (1.39 KB) |
-| **Direct SQLite WAL Transaction** | **~6,620 tx/sec** | `151 µs/op` | 103 allocs/op (4.22 KB) |
-| **Full HTTP Ingestion Pipeline** | **~5,650 req/sec** | `177 µs/op` | 223 allocs/op (15.0 KB) |
+| **HMAC Sign & Constant-Time Verify** | **~335,000 ops/sec** | `2,983 ns/op` | 24 allocs/op (1.39 KB) |
+| **Direct SQLite WAL Transaction** | **~1,760 tx/sec** | `565 us/op` | 96 allocs/op (3.95 KB) |
+| **Full HTTP Ingestion Pipeline** | **~780 req/sec** | `1,283 us/op` | 239 allocs/op (16.0 KB) |
+
+*(Note: Benchmark includes overhead of strict SetMaxOpenConns(1) locks, background lease reaper execution, metric aggregations, and synchronous disk writes).*
+
+---
+
+## Observability & Operations
+
+SentryRelay provides a comprehensive suite of tools for operators:
+
+1. **Prometheus Metrics**: `GET /metrics` exposes full Prometheus telemetry including HTTP latencies (histograms), active queue depths grouped by state, and retry counters.
+2. **Structured Logging**: Fully integrated with `log/slog` for structured JSON logs, tracing request paths with `trace_id` correlation.
+3. **Headless CLI (`sentryrelay-ctl`)**: The included management CLI allows operators to locally triage queues without SQL access.
+   - `sentryrelay-ctl status`
+   - `sentryrelay-ctl queue inspect`
+   - `sentryrelay-ctl dlq list`
+   - `sentryrelay-ctl dlq replay <id>`
+
+## Rate Limiting & Protection
+
+- **Tenant Rate Limits**: Token bucket (via `golang.org/x/time/rate`) strictly enforcing per-tenant ingestion limits.
+- **Destination Concurrency Limits**: Channel-based semaphores per destination host prevent overwhelming downstream Webhook targets.
+- **Queue Backpressure**: Atomic checks against the active queue depth reject incoming traffic (`503 Service Unavailable`) automatically when maximum capacity is reached.
 
 ---
 
