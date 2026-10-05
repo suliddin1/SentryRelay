@@ -92,16 +92,16 @@
   - FIXED: trace ID was never echoed to callers nor placed in request context; caller IDs were unbounded
 
 ## Audit Phase 4: Review Rate Limiting, Tenant Protection & CLI
-- [ ] Audit token bucket tenant rate limits and concurrency semaphores
-- [ ] Audit TotalQueueDepth backpressure logic and atomic counters (add server-level 503 test now that depth is real)
-- [ ] Audit sentryrelay-ctl operational endpoints
+- [x] Audit token bucket tenant rate limits and concurrency semaphores
+- [x] Audit TotalQueueDepth backpressure logic and atomic counters (add server-level 503 test now that depth is real)
+- [x] Audit sentryrelay-ctl operational endpoints
 - Open findings to verify/fix:
   - Operator endpoints (/v1/queue, /v1/dlq, /v1/dlq/{id}/replay, /v1/status, /metrics) appear to have no authentication
   - Destination-concurrency rejection is recorded as a real attempt (increments attempt_count) and can dead-letter a job that was never sent
   - Tenant rate limit is applied before tenant authentication (unknown tenant IDs can grow the limiter map)
 
-## Audit Phase 5: Review Fault Injection & Chaos Testing
-- [ ] Audit chaos_test.go constraints, HTTP connection pools, and quiescence logic
+## Audit Phase 5: Review Fault Injection & Chaos Testing (Completed)
+- [x] Audit chaos_test.go constraints, HTTP connection pools, and quiescence logic
 - Open findings to verify/fix:
   - Pragmas are applied via db.Exec on one connection, not via DSN; a replaced connection (ErrBadConn) would lose foreign_keys/busy_timeout. Phase 1.1 notes claim `_pragma` DSN params were used — they are not.
   - Fencing-path attempt insert error is ignored; json.Unmarshal of headers errors are ignored

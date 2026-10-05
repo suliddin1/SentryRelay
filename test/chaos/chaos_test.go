@@ -30,7 +30,8 @@ func TestChaos_ResilienceAndDataIntegrity(t *testing.T) {
 	}
 
 	// 1. Setup Mock Destination Server with chaotic behavior
-	var deliveryAttempts sync.Map // Track how many times a payload was delivered
+	var deliveryAttempts sync.Map // Track how many times a payload hit the handler
+	var successAttempts sync.Map  // Track how many times we returned 200 OK
 
 	chaosDest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		payloadID := r.Header.Get("X-Test-Payload-ID")
@@ -42,6 +43,10 @@ func TestChaos_ResilienceAndDataIntegrity(t *testing.T) {
 		roll := rand.Intn(100)
 		switch {
 		case roll < 20: // 20% Success
+			if payloadID != "" {
+				s, _ := successAttempts.LoadOrStore(payloadID, 0)
+				successAttempts.Store(payloadID, s.(int)+1)
+			}
 			w.WriteHeader(http.StatusOK)
 		case roll < 40: // 20% Transient 429
 			w.WriteHeader(http.StatusTooManyRequests)
@@ -57,6 +62,10 @@ func TestChaos_ResilienceAndDataIntegrity(t *testing.T) {
 			}
 			return
 		default: // 20% Slow Response
+			if payloadID != "" {
+				s, _ := successAttempts.LoadOrStore(payloadID, 0)
+				successAttempts.Store(payloadID, s.(int)+1)
+			}
 			time.Sleep(50 * time.Millisecond)
 			w.WriteHeader(http.StatusOK)
 		}
@@ -253,4 +262,40 @@ func TestChaos_ResilienceAndDataIntegrity(t *testing.T) {
 	if totalProcessed != numRequests {
 		t.Errorf("Expected exactly %d processed jobs, found %d (Delivered: %d, DLQ: %d)", numRequests, totalProcessed, delivered, dlq)
 	}
+
+	// 8. Verify Destination Delivery Integrity
+	var lost int
+	var duplicates int
+	var strictlyDelivered int
+
+	for i := 0; i < numRequests; i++ {
+		payloadID := fmt.Sprintf("msg-%d", i)
+		val, ok := successAttempts.Load(payloadID)
+		successCount := 0
+		if ok {
+			successCount = val.(int)
+		}
+
+		if successCount == 0 {
+			// If 0 successful attempts at destination, it MUST be in DLQ
+			// We can't trivially check DB state per job here, but if totalProcessed == numRequests,
+			// and sum(success) + sum(dlq) = numRequests (roughly), we are good.
+			// Actually, just tracking 'lost' is enough. If it's not in DLQ, and success=0, it's lost.
+			// But we know totalProcessed == numRequests, so it MUST be in DLQ!
+		} else if successCount == 1 {
+			strictlyDelivered++
+		} else if successCount > 1 {
+			duplicates++
+		}
+	}
+	
+	t.Logf("Delivery breakdown: Exactly Once: %d, Duplicates (At Least Once): %d, Failed/DLQ: %d", strictlyDelivered, duplicates, numRequests-(strictlyDelivered+duplicates))
+	
+	if strictlyDelivered+duplicates+dlq < numRequests {
+		lost = numRequests - (strictlyDelivered + duplicates + int(dlq))
+		if lost > 0 {
+			t.Errorf("CRITICAL DATA LOSS: %d events were neither successfully delivered nor dead-lettered!", lost)
+		}
+	
+}
 }

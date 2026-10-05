@@ -282,7 +282,9 @@ func (p *Pool) reaperLoop(ctx context.Context) {
 	defer ticker.Stop()
 
 	// Run initial reap immediately on startup to recover any crashed worker leases
-	_, _ = p.db.ReapStaleLeases(ctx, time.Now().UTC())
+	if _, dlqCount, err := p.db.ReapStaleLeases(ctx, time.Now().UTC()); err == nil && dlqCount > 0 {
+		telemetry.DLQTransitions.Add(float64(dlqCount))
+	}
 
 	for {
 		select {
@@ -291,7 +293,9 @@ func (p *Pool) reaperLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			_, _ = p.db.ReapStaleLeases(ctx, time.Now().UTC())
+			if _, dlqCount, err := p.db.ReapStaleLeases(ctx, time.Now().UTC()); err == nil && dlqCount > 0 {
+				telemetry.DLQTransitions.Add(float64(dlqCount))
+			}
 		}
 	}
 }

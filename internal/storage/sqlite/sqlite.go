@@ -100,30 +100,25 @@ func epochMsToNullTime(ms sql.NullInt64) *time.Time {
 
 // Open initializes SQLite, applies WAL mode and concurrency pragmas, and configures single-writer connection pooling.
 func Open(dsn string) (*DB, error) {
-	db, err := sql.Open("sqlite", dsn)
+	// Apply pragmas via DSN query parameters to ensure they persist across connection reconnects
+	// by the database/sql driver. Using db.Exec() only applies to the first connection, which drops
+	// if the connection resets (e.g., driver.ErrBadConn).
+	separator := "?"
+	if strings.Contains(dsn, "?") {
+		separator = "&"
+	}
+	pragmas := "_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
+	dsnWithPragmas := dsn + separator + pragmas
+
+	db, err := sql.Open("sqlite", dsnWithPragmas)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open sqlite database: %w", err)
 	}
 
-	// Single connection for SQLite avoids multi-connection lock contention and ensures pragmas remain active
+	// Single connection for SQLite avoids multi-connection lock contention
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(0)
-
-	// Pragmas for WAL mode, busy timeout, and relational integrity
-	pragmas := []string{
-		"PRAGMA journal_mode = WAL;",
-		"PRAGMA synchronous = NORMAL;",
-		"PRAGMA busy_timeout = 5000;",
-		"PRAGMA foreign_keys = ON;",
-	}
-
-	for _, p := range pragmas {
-		if _, err := db.Exec(p); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("failed to execute pragma '%s': %w", p, err)
-		}
-	}
 
 	// Initialize tables
 	if _, err := db.Exec(schema); err != nil {
@@ -355,10 +350,10 @@ type StaleJobInfo struct {
 
 // ReapStaleLeases recovers jobs stuck in IN_FLIGHT whose lease has expired (e.g. crashed workers).
 // It increments attempt_count and creates an attempt log to prevent poison-pill payload loops.
-func (d *DB) ReapStaleLeases(ctx context.Context, now time.Time) (int64, error) {
+func (d *DB) ReapStaleLeases(ctx context.Context, now time.Time) (reapedCount int64, dlqCount int64, err error) {
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, fmt.Errorf("failed to begin reap transaction: %w", err)
+		return 0, 0, fmt.Errorf("failed to begin reap transaction: %w", err)
 	}
 	defer tx.Rollback()
 
@@ -370,7 +365,7 @@ func (d *DB) ReapStaleLeases(ctx context.Context, now time.Time) (int64, error) 
 		FROM delivery_jobs
 		WHERE status = ? AND leased_until < ?`, string(model.StatusInFlight), nowMs)
 	if err != nil {
-		return 0, fmt.Errorf("failed to query stale leases: %w", err)
+		return 0, 0, fmt.Errorf("failed to query stale leases: %w", err)
 	}
 	defer rows.Close()
 
@@ -378,12 +373,12 @@ func (d *DB) ReapStaleLeases(ctx context.Context, now time.Time) (int64, error) 
 	for rows.Next() {
 		var s StaleJobInfo
 		if err := rows.Scan(&s.ID, &s.AttemptCount, &s.MaxAttempts); err != nil {
-			return 0, fmt.Errorf("failed to scan stale job: %w", err)
+			return 0, 0, fmt.Errorf("failed to scan stale job: %w", err)
 		}
 		staleJobs = append(staleJobs, s)
 	}
+	rows.Close() // Close early before ExecContext loops
 
-	var reapedCount int64
 	for _, job := range staleJobs {
 		newAttemptCount := job.AttemptCount + 1
 
@@ -394,7 +389,7 @@ func (d *DB) ReapStaleLeases(ctx context.Context, now time.Time) (int64, error) 
 		_, err := tx.ExecContext(ctx, insertAttempt,
 			uuid.NewString(), job.ID, newAttemptCount, 0, 0, "Worker lease expired or abandoned; reclaimed by reaper", nowMs)
 		if err != nil {
-			return 0, fmt.Errorf("failed to log reaper attempt: %w", err)
+			return 0, 0, fmt.Errorf("failed to log reaper attempt: %w", err)
 		}
 
 		if newAttemptCount >= job.MaxAttempts {
@@ -406,6 +401,7 @@ func (d *DB) ReapStaleLeases(ctx context.Context, now time.Time) (int64, error) 
 				    leased_at = NULL, leased_until = NULL, updated_at = ?
 				WHERE id = ?`
 			_, err = tx.ExecContext(ctx, updateQuery, string(model.StatusDeadLetter), newAttemptCount, nowMs, job.ID)
+			dlqCount++
 		} else {
 			// Reclaim to RETRY_PENDING
 			updateQuery := `
@@ -418,16 +414,16 @@ func (d *DB) ReapStaleLeases(ctx context.Context, now time.Time) (int64, error) 
 		}
 
 		if err != nil {
-			return 0, fmt.Errorf("failed to update stale job %s: %w", job.ID, err)
+			return 0, 0, fmt.Errorf("failed to update stale job %s: %w", job.ID, err)
 		}
 		reapedCount++
 	}
 
 	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("failed to commit reap transaction: %w", err)
+		return 0, 0, fmt.Errorf("failed to commit reap transaction: %w", err)
 	}
 
-	return reapedCount, nil
+	return reapedCount, dlqCount, nil
 }
 
 // RecordAttempt persists an individual delivery attempt and updates the job's lifecycle status.
@@ -489,8 +485,11 @@ func (d *DB) RecordAttempt(ctx context.Context, attempt *model.DeliveryAttempt, 
 		insertAttempt := `
 			INSERT INTO delivery_attempts (id, job_id, attempt_number, status_code, execution_duration_ms, error_message, created_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?)`
-		_, _ = tx.ExecContext(ctx, insertAttempt,
+		_, err = tx.ExecContext(ctx, insertAttempt,
 			attempt.ID, attempt.JobID, attempt.AttemptNumber, attempt.StatusCode, attempt.ExecutionDurationMs, attempt.ErrorMessage, attemptCreatedAtMs)
+		if err != nil {
+			return fmt.Errorf("%w: failed to insert orphaned attempt: %v", model.ErrLeaseLost, err)
+		}
 		_ = tx.Commit()
 		return model.ErrLeaseLost
 	}
@@ -555,7 +554,9 @@ func (d *DB) GetJobWithEvent(ctx context.Context, jobID string) (*model.Delivery
 	}
 
 	e.CreatedAt = fromEpochMs(eCreatedMs)
-	_ = json.Unmarshal([]byte(headersStr), &e.Headers)
+	if err := json.Unmarshal([]byte(headersStr), &e.Headers); err != nil {
+		return nil, nil, fmt.Errorf("failed to deserialize headers for event %s: %w", e.ID, err)
+	}
 
 	return &j, &e, nil
 }
@@ -637,7 +638,9 @@ func (d *DB) getEventAndJobTx(ctx context.Context, tx *sql.Tx, eventID string) (
 		return nil, nil, fmt.Errorf("failed to query event: %w", err)
 	}
 	ev.CreatedAt = fromEpochMs(evCreatedMs)
-	_ = json.Unmarshal([]byte(headersStr), &ev.Headers)
+	if err := json.Unmarshal([]byte(headersStr), &ev.Headers); err != nil {
+		return nil, nil, fmt.Errorf("failed to deserialize headers for event %s: %w", ev.ID, err)
+	}
 
 	var job model.DeliveryJob
 	var statusStr string

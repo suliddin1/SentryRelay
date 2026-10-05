@@ -253,7 +253,7 @@ func TestReapStaleLeases(t *testing.T) {
 
 	// Fast-forward time for reaper to ensure lease is expired
 	reapTime := time.Now().Add(5 * time.Second).UTC()
-	reaped, err := db.ReapStaleLeases(ctx, reapTime)
+	reaped, _, err := db.ReapStaleLeases(ctx, reapTime)
 	if err != nil {
 		t.Fatalf("failed to reap leases: %v", err)
 	}
@@ -352,7 +352,7 @@ func TestRecordAttempt_LeaseFencing(t *testing.T) {
 
 	// 2. Lease expires and reaper reclaims the job
 	time.Sleep(150 * time.Millisecond)
-	reaped, err := db.ReapStaleLeases(ctx, time.Now().UTC())
+	reaped, _, err := db.ReapStaleLeases(ctx, time.Now().UTC())
 	if err != nil || reaped != 1 {
 		t.Fatalf("failed to reap lease: %v (count=%d)", err, reaped)
 	}
@@ -408,7 +408,7 @@ func TestReapStaleLeases_PoisonPillMaxAttempts(t *testing.T) {
 	// 1st crash cycle: claim and expire
 	_, _ = db.ClaimJobs(ctx, 1, 50*time.Millisecond, time.Now().UTC())
 	time.Sleep(60 * time.Millisecond)
-	reaped1, err := db.ReapStaleLeases(ctx, time.Now().UTC())
+	reaped1, _, err := db.ReapStaleLeases(ctx, time.Now().UTC())
 	if err != nil || reaped1 != 1 {
 		t.Fatalf("cycle 1 reap failed: %v", err)
 	}
@@ -421,7 +421,7 @@ func TestReapStaleLeases_PoisonPillMaxAttempts(t *testing.T) {
 	// 2nd crash cycle: claim and expire (reaches max attempts)
 	_, _ = db.ClaimJobs(ctx, 1, 50*time.Millisecond, time.Now().UTC())
 	time.Sleep(60 * time.Millisecond)
-	reaped2, err := db.ReapStaleLeases(ctx, time.Now().UTC())
+	reaped2, _, err := db.ReapStaleLeases(ctx, time.Now().UTC())
 	if err != nil || reaped2 != 1 {
 		t.Fatalf("cycle 2 reap failed: %v", err)
 	}
