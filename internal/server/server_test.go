@@ -159,3 +159,33 @@ func TestServer_IngestSecurityFailures(t *testing.T) {
 		t.Fatalf("expected 400 Bad Request for SSRF cloud metadata URL, got %d", recSSRF.Code)
 	}
 }
+
+func TestServer_IngestBackpressure(t *testing.T) {
+	db, err := sqlite.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	srv := NewServer(Config{
+		DefaultMaxRetry:        5,
+		ReplayTolerance:        5 * time.Minute,
+		AllowLocalDestinations: true,
+	}, db)
+	// Override after NewServer creation
+	srv.maxQueueDepth = 0
+
+	payload := []byte("{\"event\":\"test\"}")
+	req := httptest.NewRequest(http.MethodPost, "/v1/ingest", bytes.NewReader(payload))
+	req.Header.Set("X-SentryRelay-Tenant-ID", "tenant-1")
+	req.Header.Set("X-SentryRelay-Signature", "sig")
+	req.Header.Set("X-SentryRelay-Timestamp", "123456")
+	req.Header.Set("X-SentryRelay-Idempotency-Key", "idemp")
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 for backpressure, got %d", rec.Code)
+	}
+}

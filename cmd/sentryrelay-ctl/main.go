@@ -13,9 +13,25 @@ import (
 )
 
 var (
+	adminToken = flag.String("admin-token", os.Getenv("SENTRYRELAY_ADMIN_TOKEN"), "Admin token for operator endpoints")
 	endpoint = flag.String("endpoint", "http://localhost:8080", "SentryRelay API endpoint")
 	client   = &http.Client{Timeout: 5 * time.Second}
 )
+
+func doRequest(method, path string, body []byte) (*http.Response, error) {
+	var bodyReader io.Reader
+	if body != nil {
+		bodyReader = bytes.NewReader(body)
+	}
+	req, err := http.NewRequest(method, fmt.Sprintf("%s%s", *endpoint, path), bodyReader)
+	if err != nil {
+		return nil, err
+	}
+	if *adminToken != "" {
+		req.Header.Set("Authorization", "Bearer " + *adminToken)
+	}
+	return client.Do(req)
+}
 
 func main() {
 	flag.Parse()
@@ -82,7 +98,7 @@ Options:`)
 }
 
 func getJSON(path string, target interface{}) error {
-	resp, err := client.Get(*endpoint + path)
+	resp, err := doRequest(http.MethodGet, path, nil)
 	if err != nil {
 		return err
 	}
@@ -160,13 +176,7 @@ func handleDLQList() {
 }
 
 func handleDLQReplay(jobID string) {
-	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/v1/dlq/%s/replay", *endpoint, jobID), bytes.NewReader(nil))
-	if err != nil {
-		fmt.Printf("Failed to create request: %v\n", err)
-		os.Exit(1)
-	}
-
-	resp, err := client.Do(req)
+	resp, err := doRequest(http.MethodPost, fmt.Sprintf("/v1/dlq/%s/replay", jobID), nil)
 	if err != nil {
 		fmt.Printf("Request failed: %v\n", err)
 		os.Exit(1)

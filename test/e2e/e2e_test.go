@@ -66,6 +66,7 @@ func setupE2E(t *testing.T, maxRetries int, retryPolicy retry.Policy) *testEnvir
 		DefaultMaxRetry:        maxRetries,
 		ReplayTolerance:        5 * time.Minute,
 		AllowLocalDestinations: true,
+		AdminToken: "test-admin-token",
 	}, db)
 	testSrv := httptest.NewServer(httpSrv.Handler())
 
@@ -136,7 +137,9 @@ func TestE2E_FullPipeline_DeliverySuccess(t *testing.T) {
 	deadline := time.Now().Add(3 * time.Second)
 	var finalStatus string
 	for time.Now().Before(deadline) {
-		jobResp, err := http.Get(fmt.Sprintf("%s/v1/jobs/%s", env.srv.URL, jobID))
+		reqJob, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/v1/jobs/%s", env.srv.URL, jobID), nil)
+		reqJob.Header.Set("Authorization", "Bearer test-admin-token")
+		jobResp, err := http.DefaultClient.Do(reqJob)
 		if err == nil && jobResp.StatusCode == http.StatusOK {
 			var body map[string]interface{}
 			_ = json.NewDecoder(jobResp.Body).Decode(&body)
@@ -218,7 +221,9 @@ func TestE2E_RetryExhaustion_DLQ_AndReplay(t *testing.T) {
 	deadline := time.Now().Add(4 * time.Second)
 	var finalStatus string
 	for time.Now().Before(deadline) {
-		jobResp, err := http.Get(fmt.Sprintf("%s/v1/jobs/%s", env.srv.URL, jobID))
+		reqJob, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/v1/jobs/%s", env.srv.URL, jobID), nil)
+		reqJob.Header.Set("Authorization", "Bearer test-admin-token")
+		jobResp, err := http.DefaultClient.Do(reqJob)
 		if err == nil && jobResp.StatusCode == http.StatusOK {
 			var body map[string]interface{}
 			_ = json.NewDecoder(jobResp.Body).Decode(&body)
@@ -238,7 +243,9 @@ func TestE2E_RetryExhaustion_DLQ_AndReplay(t *testing.T) {
 	}
 
 	// Verify DLQ list endpoint
-	dlqResp, err := http.Get(env.srv.URL + "/v1/dlq")
+	reqDLQ, _ := http.NewRequest(http.MethodGet, env.srv.URL+"/v1/dlq", nil)
+	reqDLQ.Header.Set("Authorization", "Bearer test-admin-token")
+	dlqResp, err := http.DefaultClient.Do(reqDLQ)
 	if err != nil || dlqResp.StatusCode != http.StatusOK {
 		t.Fatalf("failed to query DLQ: %v", err)
 	}
@@ -254,7 +261,9 @@ func TestE2E_RetryExhaustion_DLQ_AndReplay(t *testing.T) {
 	// Now fix destination endpoint and replay job
 	shouldFail.Store(false)
 
-	replayResp, err := http.Post(fmt.Sprintf("%s/v1/dlq/%s/replay", env.srv.URL, jobID), "application/json", nil)
+	reqReplay, _ := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/v1/dlq/%s/replay", env.srv.URL, jobID), nil)
+	reqReplay.Header.Set("Authorization", "Bearer test-admin-token")
+	replayResp, err := http.DefaultClient.Do(reqReplay)
 	if err != nil || replayResp.StatusCode != http.StatusOK {
 		t.Fatalf("failed to replay job: %v", err)
 	}
@@ -264,7 +273,9 @@ func TestE2E_RetryExhaustion_DLQ_AndReplay(t *testing.T) {
 	deliveredDeadline := time.Now().Add(3 * time.Second)
 	deliveredStatus := ""
 	for time.Now().Before(deliveredDeadline) {
-		jobResp, err := http.Get(fmt.Sprintf("%s/v1/jobs/%s", env.srv.URL, jobID))
+		reqJob, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/v1/jobs/%s", env.srv.URL, jobID), nil)
+		reqJob.Header.Set("Authorization", "Bearer test-admin-token")
+		jobResp, err := http.DefaultClient.Do(reqJob)
 		if err == nil && jobResp.StatusCode == http.StatusOK {
 			var body map[string]interface{}
 			_ = json.NewDecoder(jobResp.Body).Decode(&body)

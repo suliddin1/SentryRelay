@@ -29,6 +29,7 @@ type Server struct {
 	replayTolerance        time.Duration
 	allowLocalDestinations bool
 	startedAt              time.Time
+	adminToken             string
 }
 
 // Config provides configuration parameters for the HTTP server.
@@ -39,6 +40,7 @@ type Config struct {
 	TenantRateLimit        float64
 	TenantBurstLimit       int
 	MaxQueueDepth          int64
+	AdminToken             string
 }
 
 // NewServer initializes HTTP routes for webhook ingestion, health probes, and DLQ management.
@@ -68,6 +70,7 @@ func NewServer(cfg Config, db *sqlite.DB) *Server {
 		replayTolerance:        cfg.ReplayTolerance,
 		allowLocalDestinations: cfg.AllowLocalDestinations,
 		startedAt:              time.Now().UTC(),
+		adminToken:             cfg.AdminToken,
 	}
 
 	s.routes()
@@ -83,12 +86,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
 	s.mux.Handle("POST /v1/ingest", telemetry.Middleware(http.HandlerFunc(s.handleIngest), "ingest"))
-	s.mux.HandleFunc("GET /v1/jobs/{id}", s.handleGetJob)
-	s.mux.HandleFunc("GET /v1/queue", s.handleListQueue)
-	s.mux.HandleFunc("GET /v1/dlq", s.handleListDLQ)
-	s.mux.HandleFunc("POST /v1/dlq/{id}/replay", s.handleReplayDLQ)
-	s.mux.HandleFunc("GET /v1/status", s.handleStatus)
-	s.mux.Handle("GET /metrics", promhttp.Handler())
+	s.mux.Handle("GET /v1/jobs/{id}", s.adminAuthMiddleware(http.HandlerFunc(s.handleGetJob)))
+	s.mux.Handle("GET /v1/queue", s.adminAuthMiddleware(http.HandlerFunc(s.handleListQueue)))
+	s.mux.Handle("GET /v1/dlq", s.adminAuthMiddleware(http.HandlerFunc(s.handleListDLQ)))
+	s.mux.Handle("POST /v1/dlq/{id}/replay", s.adminAuthMiddleware(http.HandlerFunc(s.handleReplayDLQ)))
+	s.mux.Handle("GET /v1/status", s.adminAuthMiddleware(http.HandlerFunc(s.handleStatus)))
+	s.mux.Handle("GET /metrics", s.adminAuthMiddleware(promhttp.Handler()))
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -125,7 +128,22 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 0.5 Rate Limit Check per Tenant
+	// 0.5 Authenticate Tenant (Do this BEFORE rate limit so invalid tenants don't bloat limiter map)
+	tenant, err := s.db.GetTenant(r.Context(), tenantID)
+	if errors.Is(err, model.ErrTenantNotFound) {
+		writeError(w, http.StatusUnauthorized, "invalid tenant")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to query tenant")
+		return
+	}
+	if !tenant.Enabled {
+		writeError(w, http.StatusForbidden, "tenant is disabled")
+		return
+	}
+
+	// 1. Rate Limit Check per Tenant
 	if !s.tenantLimiter.Allow(tenantID) {
 		w.Header().Set("Retry-After", "1")
 		writeError(w, http.StatusTooManyRequests, "rate limit exceeded for tenant")
@@ -153,21 +171,6 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 	idempotencyKey := r.Header.Get("X-SentryRelay-Idempotency-Key")
 	if idempotencyKey == "" {
 		writeError(w, http.StatusBadRequest, "missing required header: X-SentryRelay-Idempotency-Key")
-		return
-	}
-
-	// 1. Authenticate Tenant
-	tenant, err := s.db.GetTenant(r.Context(), tenantID)
-	if errors.Is(err, model.ErrTenantNotFound) {
-		writeError(w, http.StatusUnauthorized, "invalid tenant")
-		return
-	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to query tenant")
-		return
-	}
-	if !tenant.Enabled {
-		writeError(w, http.StatusForbidden, "tenant is disabled")
 		return
 	}
 

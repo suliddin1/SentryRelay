@@ -735,3 +735,53 @@ func (d *DB) ListQueueJobs(ctx context.Context, limit, offset int) ([]*model.Del
 	}
 	return jobs, nil
 }
+
+// ReleaseLease gives up a job's lease without recording an attempt or incrementing the attempt count.
+// This is used for internal backpressure (e.g. destination concurrency limits).
+func (d *DB) ReleaseLease(ctx context.Context, jobID string, expectedLeaseUntil *time.Time, nextRetryAt time.Time, reason string) error {
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin release transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	nowMs := toEpochMs(time.Now().UTC())
+	nextRetryMs := toEpochMs(nextRetryAt)
+
+	var updateQuery string
+	var args []interface{}
+
+	if expectedLeaseUntil != nil {
+		expectedLeaseMs := toEpochMs(*expectedLeaseUntil)
+		updateQuery = `
+			UPDATE delivery_jobs
+			SET status = ?, next_retry_at = ?,
+			    leased_at = NULL, leased_until = NULL, last_error_message = ?, updated_at = ?
+			WHERE id = ? AND status = ? AND leased_until = ?`
+		args = []interface{}{
+			string(model.StatusRetryPending), nextRetryMs, reason, nowMs,
+			jobID, string(model.StatusInFlight), expectedLeaseMs,
+		}
+	} else {
+		updateQuery = `
+			UPDATE delivery_jobs
+			SET status = ?, next_retry_at = ?,
+			    leased_at = NULL, leased_until = NULL, last_error_message = ?, updated_at = ?
+			WHERE id = ?`
+		args = []interface{}{
+			string(model.StatusRetryPending), nextRetryMs, reason, nowMs, jobID,
+		}
+	}
+
+	res, err := tx.ExecContext(ctx, updateQuery, args...)
+	if err != nil {
+		return fmt.Errorf("failed to update delivery job state: %w", err)
+	}
+
+	rowsAffected, _ := res.RowsAffected()
+	if expectedLeaseUntil != nil && rowsAffected == 0 {
+		return model.ErrLeaseLost
+	}
+
+	return tx.Commit()
+}

@@ -223,3 +223,9 @@
 ### Verification
 - `go vet ./...` clean, `gofmt -l` clean, `go build ./...` OK
 - `go test -race -count=1 ./...` — all packages pass, including chaos and e2e
+### Phase 7.4 (Audit Phase 4 - Rate Limiting, Tenant Protection & CLI)
+- **Token Bucket OOM Exploit Fix:** Moved tenant authorization (SQLite lookup) to happen *before* the tenant rate limiter in server.go:handleIngest(). Previously, a malicious actor could send requests with random tenant IDs and permanently allocate token buckets in the atelimit.TenantLimiter sync.Map, causing memory exhaustion.
+- **Operator Endpoints Secured:** Operational endpoints (/v1/jobs, /v1/queue, /v1/dlq, /v1/status, /metrics) were fully unauthenticated. Introduced dminAuthMiddleware, a new AdminToken field in Config, and --admin-token CLI flag to secure these routes. 
+- **sentryrelay-ctl CLI Updates:** Upgraded the CLI to support --admin-token (and $SENTRYRELAY_ADMIN_TOKEN), unifying all network requests to automatically inject the Bearer token when interacting with the secured operator endpoints.
+- **Destination Concurrency Dead-Letter Fix:** Fixed a massive logical flaw where jobs rejected internally by the destination concurrency limiter (p.destLimiter.TryAcquire) would be treated as transient failures. They consumed AttemptCount and generated dead attempts. If a destination was saturated, the job would instantly reach MaxAttempts and dead-letter without making a single HTTP request. Fixed by introducing db.ReleaseLease which relinquishes the lease and sets a 5s backoff *without* incrementing attempt counts.
+- **Backpressure E2E Testing:** Added TestServer_IngestBackpressure to verify that hitting TotalQueueDepth >= maxQueueDepth actually returns 503 Service Unavailable instead of falling through to authentication errors (confirmed fixed via telemetry fixes in Phase 3).

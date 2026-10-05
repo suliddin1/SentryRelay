@@ -204,24 +204,21 @@ func (p *Pool) processJob(ctx context.Context, job *model.DeliveryJob) {
 
 	// 2. Enforce Destination Concurrency Limit
 	if host != "" && !p.destLimiter.TryAcquire(host) {
-		res = delivery.Result{
-			Classification: retry.ClassificationTransient,
-			Attempt: &model.DeliveryAttempt{
-				JobID:               job.ID,
-				AttemptNumber:       jobWithEvent.AttemptCount + 1,
-				StatusCode:          429,
-				ExecutionDurationMs: 0,
-				ErrorMessage:        "destination concurrency limit reached",
-			},
+		// Just release the lease and backoff slightly, without incrementing attempt_count
+		nextRetryAt := time.Now().UTC().Add(5 * time.Second)
+		err := p.db.ReleaseLease(ctx, job.ID, jobWithEvent.LeasedUntil, nextRetryAt, "destination concurrency limit reached")
+		if err != nil && !errors.Is(err, model.ErrLeaseLost) {
+			slog.Error("Failed to release lease on concurrency limit", "job_id", job.ID, "error", err)
 		}
-	} else {
-		// Deliver payload to destination
-		start := time.Now()
-		res = p.client.Deliver(ctx, jobWithEvent, event)
-		duration = time.Since(start)
-		if host != "" {
-			p.destLimiter.Release(host)
-		}
+		return
+	}
+
+	// Deliver payload to destination
+	start := time.Now()
+	res = p.client.Deliver(ctx, jobWithEvent, event)
+	duration = time.Since(start)
+	if host != "" {
+		p.destLimiter.Release(host)
 	}
 
 	if duration > 0 {

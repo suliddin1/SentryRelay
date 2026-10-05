@@ -31,6 +31,7 @@ func main() {
 		reaperInterval = flag.Duration("reaper-interval", 5*time.Second, "Interval for stale lease recovery reaper")
 		seedDevTenant  = flag.Bool("seed-dev-tenant", false, "Seed a default development tenant if absent")
 		allowLocalDest = flag.Bool("allow-local-destinations", false, "Allow delivery to localhost/loopback destinations (dev/test only)")
+		adminToken     = flag.String("admin-token", "", "Bearer token required to access operator endpoints (disabled if empty)")
 	)
 	flag.Parse()
 
@@ -83,6 +84,7 @@ func main() {
 		DefaultMaxRetry:        5,
 		ReplayTolerance:        5 * time.Minute,
 		AllowLocalDestinations: *allowLocalDest || *seedDevTenant,
+		AdminToken:             *adminToken,
 	}
 	srv := server.NewServer(srvConfig, db)
 
