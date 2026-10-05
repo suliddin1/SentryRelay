@@ -1,14 +1,14 @@
 package ratelimit
 
 import (
-	"testing"
 	"golang.org/x/time/rate"
+	"testing"
 )
 
 func TestTenantLimiter(t *testing.T) {
 	// 5 events per second, burst 5
 	limiter := NewTenantLimiter(rate.Limit(5), 5)
-	
+
 	tenantID := "test_tenant"
 
 	// First 5 should succeed

@@ -200,3 +200,26 @@
   - Asserted `Total Jobs == 1000` (zero dropped events).
   - Validated that system cleanly handled database fencing (`WARN Delivery attempt completed after lease expiration; state transition discarded`), avoiding corrupted state.
   - Passed flawlessly with Go's `race` detector enabled, verifying concurrency safety.
+
+
+---
+
+## Session 2026-10-05 (Audit Phase 3): Observability, Metrics & Telemetry
+- **Status**: Completed
+
+### Bugs found and fixed
+1. **Backpressure never worked / all queue gauges read 0** — `updateQueueDepths` looked up `"PENDING"` etc., but storage returns lowercase persisted statuses (`pending`). Verified red/green: the new regression test fails on the old code with `TotalQueueDepth = 0, want 12`.
+2. Collector swallowed DB errors silently; first collection waited one full interval (5s) after startup.
+3. `sentryrelay_dlq_transitions_total` / `sentryrelay_retries_total` incremented before `RecordAttempt` commit → over-counted when lease fencing discarded the transition.
+4. Delivery latency histogram received 0s samples when no HTTP request was sent (destination concurrency limit).
+5. Trace ID was not returned in `X-Request-ID` nor stored in request context; caller-supplied IDs were unbounded in length.
+6. `gofmt` had not been applied to 4 files from earlier phases; formatted.
+
+### Corrections to earlier records
+- Phase 5 was marked as covering "process exits and database busy locks"; it covers neither (pool restarts are graceful `Stop()`), and does not verify destination-side receipt. Backlog corrected.
+- Audit Phase 2 report overstated confidence ("bulletproof"); several items were not examined. Open findings moved to Audit Phase 4/5.
+- Audit Phase 1 commit was amended and force-pushed to `main` to drop an accidentally committed scratch file (`test_race.go`).
+
+### Verification
+- `go vet ./...` clean, `gofmt -l` clean, `go build ./...` OK
+- `go test -race -count=1 ./...` — all packages pass, including chaos and e2e

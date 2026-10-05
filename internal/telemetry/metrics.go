@@ -2,11 +2,14 @@ package telemetry
 
 import (
 	"context"
+	"log/slog"
 	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+
+	"github.com/suliddin1/SentryRelay/internal/model"
 )
 
 var (
@@ -35,7 +38,7 @@ var (
 		Name: "sentryrelay_dlq_transitions_total",
 		Help: "Total number of jobs that transitioned to DEAD_LETTER",
 	})
-	
+
 	Retries = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "sentryrelay_retries_total",
 		Help: "Total number of retry attempts scheduled",
@@ -56,8 +59,10 @@ func TotalQueueDepth() int64 {
 }
 
 // StartMetricsCollector starts a background goroutine to periodically update DB gauges.
+// It performs one collection immediately so backpressure is effective from startup.
 func StartMetricsCollector(ctx context.Context, db DB, interval time.Duration) {
 	go func() {
+		updateQueueDepths(ctx, db)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
@@ -77,16 +82,25 @@ func updateQueueDepths(ctx context.Context, db DB) {
 
 	counts, err := db.GetQueueDepths(collectCtx)
 	if err != nil {
+		// Keep the last known values rather than zeroing them; a transient DB error
+		// must not silently disable backpressure.
+		slog.Warn("queue depth collection failed", "error", err)
 		return
 	}
 
-	statuses := []string{"PENDING", "IN_FLIGHT", "DELIVERED", "RETRY_PENDING", "DEAD_LETTER"}
+	// Keys must match the persisted status values (model.Status*), which are lowercase.
+	statuses := []model.DeliveryStatus{
+		model.StatusPending,
+		model.StatusInFlight,
+		model.StatusDelivered,
+		model.StatusRetryPending,
+		model.StatusDeadLetter,
+	}
 	for _, st := range statuses {
-		QueueDepth.WithLabelValues(st).Set(float64(counts[st]))
+		QueueDepth.WithLabelValues(string(st)).Set(float64(counts[string(st)]))
 	}
 
 	// Calculate total active queue depth for backpressure
-	totalActive := counts["PENDING"] + counts["RETRY_PENDING"]
+	totalActive := counts[string(model.StatusPending)] + counts[string(model.StatusRetryPending)]
 	currentTotalDepth.Store(int64(totalActive))
 }
-

@@ -64,10 +64,11 @@
   - `dlq list`: List dead-lettered events with failure diagnostics
   - `dlq replay <event_id>`: Replay dead-lettered event
 
-## Phase 5: Fault Injection & Chaos Testing (Completed)
-- [x] Fault injection framework simulating random process exits, network timeouts, and database busy locks
-- [x] Long-running stress testing under high concurrency
-- [x] Data integrity verification checks
+## Phase 5: Fault Injection & Chaos Testing (Partially complete — corrected 2026-10-05)
+- [~] Fault injection: destination failures (5xx/429/4xx/drops/latency) and worker-pool restarts are covered.
+      NOT covered: real process kills (pool.Stop() is graceful and waits for in-flight work) and database busy/lock injection.
+- [x] Stress run: 1000 concurrent ingests
+- [~] Data integrity: verifies every job reaches a terminal state; does NOT verify destination-side receipt or duplicate-delivery bounds
 
 ## Audit Phase 1: Review Core Foundation & End-to-End Delivery (Completed)
 - [x] Audit SQLite database logic, connection handling, and schema
@@ -75,20 +76,34 @@
 - [x] Audit Queue Lease Dispatcher and In-flight Reaper logic
 - [x] Audit Worker Pool outbound HTTP client, timeouts, and state classification
 
-## Audit Phase 2: Review Data Integrity & Persistence Hardening (Completed)
+## Audit Phase 2: Review Data Integrity & Persistence Hardening (Completed — review was shallow, see open findings)
 - [x] Audit SQLite connection pooling pragmas, transactions, and isolation
 - [x] Audit integer epoch timestamps and boundary checks
 - [x] Audit worker lease fencing in RecordAttempt (stale lease rejections)
 - [x] Audit duplicate ingestion constraint error handling
 
-## Audit Phase 3: Review Observability, Metrics & Telemetry
-- [ ] Audit Prometheus metrics registration, collectors, and HTTP middleware
-- [ ] Audit JSON structured logging and context propagation
+## Audit Phase 3: Review Observability, Metrics & Telemetry (Completed)
+- [x] Audit Prometheus metrics registration, collectors, and HTTP middleware
+  - FIXED: queue-depth collector used uppercase keys vs lowercase persisted statuses → all gauges 0 and backpressure never triggered
+  - FIXED: collector errors were silently swallowed; first collection waited a full interval
+  - FIXED: DLQ/retry counters incremented before commit (over-counted on lease loss)
+  - FIXED: 0s latency samples recorded when no HTTP request was made
+- [x] Audit JSON structured logging and context propagation
+  - FIXED: trace ID was never echoed to callers nor placed in request context; caller IDs were unbounded
 
 ## Audit Phase 4: Review Rate Limiting, Tenant Protection & CLI
 - [ ] Audit token bucket tenant rate limits and concurrency semaphores
-- [ ] Audit TotalQueueDepth backpressure logic and atomic counters
+- [ ] Audit TotalQueueDepth backpressure logic and atomic counters (add server-level 503 test now that depth is real)
 - [ ] Audit sentryrelay-ctl operational endpoints
+- Open findings to verify/fix:
+  - Operator endpoints (/v1/queue, /v1/dlq, /v1/dlq/{id}/replay, /v1/status, /metrics) appear to have no authentication
+  - Destination-concurrency rejection is recorded as a real attempt (increments attempt_count) and can dead-letter a job that was never sent
+  - Tenant rate limit is applied before tenant authentication (unknown tenant IDs can grow the limiter map)
 
 ## Audit Phase 5: Review Fault Injection & Chaos Testing
 - [ ] Audit chaos_test.go constraints, HTTP connection pools, and quiescence logic
+- Open findings to verify/fix:
+  - Pragmas are applied via db.Exec on one connection, not via DSN; a replaced connection (ErrBadConn) would lose foreign_keys/busy_timeout. Phase 1.1 notes claim `_pragma` DSN params were used — they are not.
+  - Fencing-path attempt insert error is ignored; json.Unmarshal of headers errors are ignored
+  - Reaper DLQ transitions are not counted in sentryrelay_dlq_transitions_total
+  - Chaos test cannot detect duplicate deliveries or lost deliveries at the destination

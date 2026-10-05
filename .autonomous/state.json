@@ -37,9 +37,13 @@
     "Rigorous end-to-end chaos testing validating crash resilience, idempotency, and data-loss prevention under heavy load (1000 concurrent reqs)"
   ],
   "active_priorities": [
-    "Audit Phase 2: Review Data Integrity & Persistence Hardening (Completed)"
+    "Audit Phase 4: Review Rate Limiting, Tenant Protection & CLI"
   ],
-  "known_technical_debt": [],
+  "known_technical_debt": [
+    "Operator endpoints appear unauthenticated (to verify in Audit Phase 4)",
+    "SQLite pragmas applied per-connection via Exec instead of DSN (to fix in Audit Phase 5)",
+    "Queue-depth backpressure was non-functional before commit for Audit Phase 3 (status key casing bug); fixed"
+  ],
   "metrics_and_benchmarks": {
     "benchmark_environment": "Intel Core i7-13650HX, Windows amd64, Go 1.27.0",
     "crypto_sign_and_verify_ns_op": 1076,

@@ -108,15 +108,15 @@ func TestChaos_ResilienceAndDataIntegrity(t *testing.T) {
 		if currentPool != nil {
 			currentPool.Stop()
 		}
-		
+
 		deliveryClient := delivery.NewClient(delivery.WithTimeout(1 * time.Second)) // short timeout
-		
+
 		cfg := worker.DefaultConfig()
 		cfg.NumWorkers = 20
 		cfg.PollInterval = 50 * time.Millisecond
 		cfg.ReaperInterval = 100 * time.Millisecond // fast reaper
-		cfg.LeaseDuration = 200 * time.Millisecond // extremely short lease to simulate fast timeouts and test fencing
-		cfg.MaxDestConcurrency = 50 // high enough
+		cfg.LeaseDuration = 200 * time.Millisecond  // extremely short lease to simulate fast timeouts and test fencing
+		cfg.MaxDestConcurrency = 50                 // high enough
 
 		currentPool = worker.NewPool(cfg, db, deliveryClient)
 		if err := currentPool.Start(ctx); err != nil {
@@ -159,7 +159,7 @@ func TestChaos_ResilienceAndDataIntegrity(t *testing.T) {
 			for id := range jobs {
 				payloadID := fmt.Sprintf("msg-%d", id)
 				payloadBytes := []byte(fmt.Sprintf(`{"msg":"%s"}`, payloadID))
-				
+
 				req, _ := http.NewRequest(http.MethodPost, apiServer.URL+"/v1/ingest", bytes.NewReader(payloadBytes))
 				req.Header.Set("X-SentryRelay-Tenant-ID", tenant.ID)
 				req.Header.Set("X-SentryRelay-Idempotency-Key", payloadID)
@@ -181,7 +181,7 @@ func TestChaos_ResilienceAndDataIntegrity(t *testing.T) {
 					atomic.AddInt32(&failCount, 1)
 					continue
 				}
-				
+
 				if resp.StatusCode != http.StatusAccepted {
 					body, _ := io.ReadAll(resp.Body)
 					fmt.Printf("ERROR: req %d expected 202 got %d: %s\n", id, resp.StatusCode, string(body))
@@ -198,9 +198,9 @@ func TestChaos_ResilienceAndDataIntegrity(t *testing.T) {
 	go func() {
 		for i := 0; i < 3; i++ {
 			time.Sleep(300 * time.Millisecond)
-			stopPool() // Boom!
+			stopPool()                         // Boom!
 			time.Sleep(100 * time.Millisecond) // downtime
-			startPool() // Restart
+			startPool()                        // Restart
 		}
 	}()
 
@@ -214,9 +214,9 @@ func TestChaos_ResilienceAndDataIntegrity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to get queue depths: %v", err)
 		}
-		
+
 		active := counts["pending"] + counts["in_flight"] + counts["retry_pending"]
-		
+
 		if i%20 == 0 {
 			t.Logf("Queue Depths at %dms: %v | Total Events: %d | Total Jobs: %d", i*100, counts, db.CountEvents(ctx), db.CountJobs(ctx))
 		}

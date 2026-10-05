@@ -705,7 +705,7 @@ func (d *DB) ListQueueJobs(ctx context.Context, limit, offset int) ([]*model.Del
 		ORDER BY created_at ASC
 		LIMIT ? OFFSET ?`
 
-	rows, err := d.db.QueryContext(ctx, query, 
+	rows, err := d.db.QueryContext(ctx, query,
 		string(model.StatusPending), string(model.StatusInFlight), string(model.StatusRetryPending),
 		limit, offset)
 	if err != nil {
@@ -730,7 +730,7 @@ func (d *DB) ListQueueJobs(ctx context.Context, limit, offset int) ([]*model.Del
 		j.LeasedUntil = epochMsToNullTime(leasedUntilMs)
 		j.CreatedAt = fromEpochMs(createdMs)
 		j.UpdatedAt = fromEpochMs(updatedMs)
-		
+
 		jobs = append(jobs, &j)
 	}
 	return jobs, nil
