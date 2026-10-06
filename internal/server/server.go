@@ -175,9 +175,14 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. Read Body (limit to 2MB to protect against memory exhaustion)
-	body, err := io.ReadAll(io.LimitReader(r.Body, 2*1024*1024))
+	// 2. Read Body (limit to 1MB to protect against memory exhaustion)
+	r.Body = http.MaxBytesReader(w, r.Body, 1024*1024)
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		if err.Error() == "http: request body too large" {
+			writeError(w, http.StatusRequestEntityTooLarge, "payload exceeds 1MB maximum")
+			return
+		}
 		writeError(w, http.StatusBadRequest, "failed to read request body")
 		return
 	}
