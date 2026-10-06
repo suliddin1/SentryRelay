@@ -78,6 +78,12 @@ func NewPool(cfg Config, db *sqlite.DB, client *delivery.Client) *Pool {
 	if cfg.MaxDestConcurrency <= 0 {
 		cfg.MaxDestConcurrency = 10
 	}
+	if cfg.PruneInterval <= 0 {
+		cfg.PruneInterval = 1 * time.Hour
+	}
+	if cfg.RetentionPeriod <= 0 {
+		cfg.RetentionPeriod = 7 * 24 * time.Hour
+	}
 
 	return &Pool{
 		cfg:         cfg,

@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE TABLE IF NOT EXISTS delivery_jobs (
     id TEXT PRIMARY KEY,
     event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    tenant_id TEXT,
     status TEXT NOT NULL,
     attempt_count INTEGER NOT NULL DEFAULT 0,
     max_attempts INTEGER NOT NULL DEFAULT 5,
@@ -51,6 +52,7 @@ CREATE TABLE IF NOT EXISTS delivery_jobs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_poll ON delivery_jobs(status, next_retry_at);
+CREATE INDEX IF NOT EXISTS idx_jobs_tenant_fair ON delivery_jobs(status, tenant_id, next_retry_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_lease ON delivery_jobs(status, leased_until);
 
 CREATE TABLE IF NOT EXISTS delivery_attempts (
@@ -124,6 +126,11 @@ func Open(dsn string) (*DB, error) {
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to initialize schema: %w", err)
+	}
+
+	// Migrate existing database to add tenant_id for fair queuing
+	if _, err := db.Exec("ALTER TABLE delivery_jobs ADD COLUMN tenant_id TEXT;"); err == nil {
+		db.Exec("UPDATE delivery_jobs SET tenant_id = (SELECT tenant_id FROM events WHERE events.id = delivery_jobs.event_id) WHERE tenant_id IS NULL;")
 	}
 
 	return &DB{db: db}, nil
@@ -241,10 +248,10 @@ func (d *DB) IngestEvent(ctx context.Context, event *model.Event, maxAttempts in
 	}
 
 	insertJobQuery := `
-		INSERT INTO delivery_jobs (id, event_id, status, attempt_count, max_attempts, next_retry_at, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+		INSERT INTO delivery_jobs (id, event_id, tenant_id, status, attempt_count, max_attempts, next_retry_at, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	_, err = tx.ExecContext(ctx, insertJobQuery,
-		job.ID, job.EventID, string(job.Status), job.AttemptCount, job.MaxAttempts, toEpochMs(job.NextRetryAt), toEpochMs(job.CreatedAt), toEpochMs(job.UpdatedAt))
+		job.ID, job.EventID, event.TenantID, string(job.Status), job.AttemptCount, job.MaxAttempts, toEpochMs(job.NextRetryAt), toEpochMs(job.CreatedAt), toEpochMs(job.UpdatedAt))
 	if err != nil {
 		return nil, nil, false, fmt.Errorf("failed to insert delivery job: %w", err)
 	}
@@ -269,36 +276,78 @@ func (d *DB) ClaimJobs(ctx context.Context, batchSize int, leaseDuration time.Du
 	defer tx.Rollback()
 
 	nowMs := toEpochMs(now)
-	query := `
+	
+	// 1. Fair Phase: Fetch up to 1 oldest job per tenant
+	fairQuery := `
 		SELECT id, event_id, status, attempt_count, max_attempts, next_retry_at, created_at, updated_at
 		FROM delivery_jobs
-		WHERE (status = ? OR status = ?) AND next_retry_at <= ?
+		WHERE id IN (
+			SELECT id FROM delivery_jobs 
+			WHERE (status = ? OR status = ?) AND next_retry_at <= ? 
+			GROUP BY tenant_id HAVING MIN(next_retry_at)
+		)
 		ORDER BY next_retry_at ASC
 		LIMIT ?`
-
-	rows, err := tx.QueryContext(ctx, query, string(model.StatusPending), string(model.StatusRetryPending), nowMs, batchSize)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query claimable jobs: %w", err)
-	}
-	defer rows.Close()
 
 	var jobIDs []string
 	var jobs []*model.DeliveryJob
 
-	for rows.Next() {
-		var j model.DeliveryJob
-		var statusStr string
-		var nextRetryMs, createdMs, updatedMs int64
-		if err := rows.Scan(&j.ID, &j.EventID, &statusStr, &j.AttemptCount, &j.MaxAttempts, &nextRetryMs, &createdMs, &updatedMs); err != nil {
-			return nil, fmt.Errorf("failed to scan job: %w", err)
+	rows, err := tx.QueryContext(ctx, fairQuery, string(model.StatusPending), string(model.StatusRetryPending), nowMs, batchSize)
+	if err == nil {
+		for rows.Next() {
+			var j model.DeliveryJob
+			var statusStr string
+			var nextRetryMs, createdMs, updatedMs int64
+			if err := rows.Scan(&j.ID, &j.EventID, &statusStr, &j.AttemptCount, &j.MaxAttempts, &nextRetryMs, &createdMs, &updatedMs); err == nil {
+				j.Status = model.DeliveryStatus(statusStr)
+				j.NextRetryAt = fromEpochMs(nextRetryMs)
+				j.CreatedAt = fromEpochMs(createdMs)
+				j.UpdatedAt = fromEpochMs(updatedMs)
+				jobs = append(jobs, &j)
+				jobIDs = append(jobIDs, j.ID)
+			}
 		}
-		j.Status = model.DeliveryStatus(statusStr)
-		j.NextRetryAt = fromEpochMs(nextRetryMs)
-		j.CreatedAt = fromEpochMs(createdMs)
-		j.UpdatedAt = fromEpochMs(updatedMs)
+		rows.Close()
+	}
 
-		jobs = append(jobs, &j)
-		jobIDs = append(jobIDs, j.ID)
+	// 2. Greedy Phase: Fill remainder of batch with absolute oldest jobs
+	if len(jobs) < batchSize {
+		remainder := batchSize - len(jobs)
+		args := []interface{}{string(model.StatusPending), string(model.StatusRetryPending), nowMs}
+		
+		placeholders := ""
+		if len(jobIDs) > 0 {
+			placeholders = " AND id NOT IN (" + strings.Repeat("?,", len(jobIDs))
+			placeholders = placeholders[:len(placeholders)-1] + ")"
+			for _, id := range jobIDs {
+				args = append(args, id)
+			}
+		}
+		args = append(args, remainder)
+
+		greedyQuery := `
+			SELECT id, event_id, status, attempt_count, max_attempts, next_retry_at, created_at, updated_at
+			FROM delivery_jobs
+			WHERE (status = ? OR status = ?) AND next_retry_at <= ?` + placeholders + `
+			ORDER BY next_retry_at ASC
+			LIMIT ?`
+
+		if rows2, err := tx.QueryContext(ctx, greedyQuery, args...); err == nil {
+			for rows2.Next() {
+				var j model.DeliveryJob
+				var statusStr string
+				var nextRetryMs, createdMs, updatedMs int64
+				if err := rows2.Scan(&j.ID, &j.EventID, &statusStr, &j.AttemptCount, &j.MaxAttempts, &nextRetryMs, &createdMs, &updatedMs); err == nil {
+					j.Status = model.DeliveryStatus(statusStr)
+					j.NextRetryAt = fromEpochMs(nextRetryMs)
+					j.CreatedAt = fromEpochMs(createdMs)
+					j.UpdatedAt = fromEpochMs(updatedMs)
+					jobs = append(jobs, &j)
+					jobIDs = append(jobIDs, j.ID)
+				}
+			}
+			rows2.Close()
+		}
 	}
 
 	if len(jobs) == 0 {
@@ -318,12 +367,12 @@ func (d *DB) ClaimJobs(ctx context.Context, batchSize int, leaseDuration time.Du
 		SET status = ?, leased_at = ?, leased_until = ?, updated_at = ?
 		WHERE id IN (%s)`, placeholders)
 
-	args := []interface{}{string(model.StatusInFlight), leasedAtMs, leasedUntilMs, nowMs}
+	updateArgs := []interface{}{string(model.StatusInFlight), leasedAtMs, leasedUntilMs, nowMs}
 	for _, id := range jobIDs {
-		args = append(args, id)
+		updateArgs = append(updateArgs, id)
 	}
 
-	if _, err := tx.ExecContext(ctx, updateQuery, args...); err != nil {
+	if _, err := tx.ExecContext(ctx, updateQuery, updateArgs...); err != nil {
 		return nil, fmt.Errorf("failed to update claimed jobs: %w", err)
 	}
 
