@@ -48,7 +48,8 @@ flowchart TD
    All timestamps (`created_at`, `updated_at`, `next_retry_at`, `leased_until`) are stored as 64-bit signed integers representing Unix epoch milliseconds (`int64`), preventing string-based comparison edge cases (such as RFC3339 trailing zero truncation where `'Z' > '.'`).
 3. **Replay Protection & Cryptographic Non-Repudiation**:
    Every incoming webhook is verified using HMAC-SHA256 signatures evaluated with constant-time equality comparisons (`crypto/subtle.ConstantTimeCompare`). Timestamps drifting beyond a configurable tolerance window (default 5 minutes) are rejected.
-4. **Race-Free Idempotent Ingestion**:
+4. **At-Least-Once Delivery & Idempotent Ingestion**:
+   SentryRelay provides an **At-Least-Once delivery guarantee**. If a destination successfully processes a webhook but the HTTP ACK (e.g., 200 OK) is lost due to a network reset or timeout, SentryRelay will safely retry the delivery. Producers supply an X-SentryRelay-Idempotency-Key for safe concurrent duplicate ingestion races, and consumers MUST also implement idempotency keys to handle retry duplicates safely.
    Producers supply an `X-SentryRelay-Idempotency-Key`. Ingestion handles concurrent duplicate submission races safely, returning the existing event identifier without enqueuing redundant delivery attempts or failing with 500 errors.
 5. **Worker Lease Fencing & Poison-Pill Mitigation**:
    Workers claim batches of jobs using visibility timeouts (`leased_until = now + lease_duration`). Delivery completion checks lease fencing: a worker whose lease expired cannot overwrite newer job states (`ErrLeaseLost`). The background Lease Reaper reclaims abandoned jobs, increments `attempt_count`, and routes poison-pill payloads to `DEAD_LETTER` once `max_attempts` is reached. Stale in-memory jobs are dropped before outbound dispatch.
