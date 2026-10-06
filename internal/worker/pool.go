@@ -27,6 +27,8 @@ type Config struct {
 	ReaperInterval     time.Duration
 	RetryPolicy        retry.Policy
 	MaxDestConcurrency int
+	PruneInterval time.Duration
+	RetentionPeriod time.Duration
 }
 
 // DefaultConfig provides recommended production settings.
@@ -38,7 +40,9 @@ func DefaultConfig() Config {
 		LeaseDuration:      30 * time.Second,
 		ReaperInterval:     5 * time.Second,
 		RetryPolicy:        retry.DefaultPolicy(),
-		MaxDestConcurrency: 10,
+				MaxDestConcurrency: 10,
+		PruneInterval:      1 * time.Hour,
+		RetentionPeriod:    7 * 24 * time.Hour,
 	}
 }
 
@@ -111,6 +115,10 @@ func (p *Pool) Start(ctx context.Context) error {
 	p.wg.Add(1)
 	go p.reaperLoop(ctx)
 
+	// 4. Start pruner goroutine
+	p.wg.Add(1)
+	go p.prunerLoop(ctx)
+
 	return nil
 }
 
@@ -151,15 +159,28 @@ func (p *Pool) dispatcherLoop(ctx context.Context, jobQueue chan<- *model.Delive
 				continue
 			}
 
-			for _, job := range jobs {
+			for i, job := range jobs {
 				select {
 				case jobQueue <- job:
 				case <-p.stopCh:
+					// Shutdown requested while enqueuing.
+					// Release all remaining claimed jobs so they don't timeout as orphans.
+					p.releaseJobs(context.Background(), jobs[i:])
 					return
 				case <-ctx.Done():
+					p.releaseJobs(context.Background(), jobs[i:])
 					return
 				}
 			}
+		}
+	}
+}
+
+func (p *Pool) releaseJobs(ctx context.Context, jobs []*model.DeliveryJob) {
+	for _, job := range jobs {
+		err := p.db.ReleaseLease(ctx, job.ID, job.LeasedUntil, time.Now().UTC(), "worker pool shutting down")
+		if err != nil {
+			slog.Warn("Failed to release lease during shutdown", "job_id", job.ID, "error", err)
 		}
 	}
 }
@@ -169,12 +190,11 @@ func (p *Pool) workerLoop(ctx context.Context, jobQueue <-chan *model.DeliveryJo
 
 	for {
 		select {
-		case <-p.stopCh:
-			return
 		case <-ctx.Done():
 			return
 		case job, ok := <-jobQueue:
 			if !ok {
+				// jobQueue closed by dispatcher during clean shutdown; drain complete.
 				return
 			}
 			// Skip jobs whose visibility lease expired while waiting in memory
@@ -295,6 +315,30 @@ func (p *Pool) reaperLoop(ctx context.Context) {
 		case <-ticker.C:
 			if _, dlqCount, err := p.db.ReapStaleLeases(ctx, time.Now().UTC()); err == nil && dlqCount > 0 {
 				telemetry.DLQTransitions.Add(float64(dlqCount))
+			}
+		}
+	}
+}
+
+
+func (p *Pool) prunerLoop(ctx context.Context) {
+	defer p.wg.Done()
+
+	ticker := time.NewTicker(p.cfg.PruneInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-p.stopCh:
+			return
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			pruned, err := p.db.Prune(ctx, p.cfg.RetentionPeriod)
+			if err != nil {
+				slog.Error("Failed to prune old records", "error", err)
+			} else if pruned > 0 {
+				slog.Info("Pruned old terminal records", "count", pruned)
 			}
 		}
 	}

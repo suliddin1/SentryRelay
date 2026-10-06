@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"log/slog"
 	"errors"
 	"fmt"
 	"io"
@@ -392,5 +393,8 @@ func writeJSON(w http.ResponseWriter, statusCode int, data interface{}) {
 }
 
 func writeError(w http.ResponseWriter, statusCode int, message string) {
+	if statusCode >= 500 {
+		slog.Error("Internal server error", "status", statusCode, "message", message)
+	}
 	writeJSON(w, statusCode, map[string]string{"error": message})
 }

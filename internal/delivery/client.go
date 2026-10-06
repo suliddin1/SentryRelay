@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/suliddin1/SentryRelay/internal/security"
+
 	"github.com/google/uuid"
 	"github.com/suliddin1/SentryRelay/internal/model"
 	"github.com/suliddin1/SentryRelay/internal/retry"
@@ -36,6 +38,17 @@ func WithHTTPClient(httpClient *http.Client) ClientOption {
 	}
 }
 
+// WithSSRFProtection enables strict SSRF protection during dialing.
+func WithSSRFProtection(allowLocal bool) ClientOption {
+	return func(c *Client) {
+		t, ok := c.httpClient.Transport.(*http.Transport)
+		if !ok || t == nil {
+			t = http.DefaultTransport.(*http.Transport).Clone()
+		}
+		t.DialContext = security.SafeDialContext(allowLocal)
+		c.httpClient.Transport = t
+	}
+}
 // NewClient initializes a delivery client with sensible production defaults.
 func NewClient(opts ...ClientOption) *Client {
 	c := &Client{
@@ -122,6 +135,9 @@ func (c *Client) Deliver(ctx context.Context, job *model.DeliveryJob, event *mod
 	if resp.StatusCode >= 400 {
 		errMsg = fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(bytes.TrimSpace(bodySample)))
 	}
+
+	// Drain the remainder of the body to ensure the HTTP connection can be reused
+	_, _ = io.Copy(io.Discard, resp.Body)
 
 	classification := retry.ClassifyResponse(resp.StatusCode, nil)
 

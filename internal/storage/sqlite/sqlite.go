@@ -788,3 +788,27 @@ func (d *DB) ReleaseLease(ctx context.Context, jobID string, expectedLeaseUntil 
 
 	return tx.Commit()
 }
+
+// Prune removes events (and their cascaded jobs/attempts) that are in a terminal state
+// and older than the specified retention period.
+func (d *DB) Prune(ctx context.Context, retention time.Duration) (int64, error) {
+	thresholdMs := toEpochMs(time.Now().UTC().Add(-retention))
+	
+	// Delete events where ALL associated jobs are in a terminal state and the event is older than threshold.
+	// Since we currently have 1:1 event to job, a simple JOIN works, but for future-proofing:
+	query := "" +
+		"DELETE FROM events " +
+		"WHERE created_at < ? " +
+		"  AND id IN ( " +
+		"	SELECT event_id FROM delivery_jobs " +
+		"	GROUP BY event_id " +
+		"	HAVING SUM(CASE WHEN status NOT IN (?, ?) THEN 1 ELSE 0 END) = 0 " +
+		"  )"
+		
+	res, err := d.db.ExecContext(ctx, query, thresholdMs, string(model.StatusDelivered), string(model.StatusDeadLetter))
+	if err != nil {
+		return 0, fmt.Errorf("failed to prune old events: %w", err)
+	}
+	
+	return res.RowsAffected()
+}

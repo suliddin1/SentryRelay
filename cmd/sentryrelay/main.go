@@ -54,7 +54,10 @@ func main() {
 	}
 
 	// Delivery client
-	client := delivery.NewClient(delivery.WithTimeout(15 * time.Second))
+	client := delivery.NewClient(
+		delivery.WithTimeout(15 * time.Second),
+		delivery.WithSSRFProtection(*allowLocalDest || *seedDevTenant),
+	)
 
 	// Worker Pool & Lease Reaper
 	workerCfg := worker.Config{

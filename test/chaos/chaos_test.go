@@ -118,7 +118,7 @@ func TestChaos_ResilienceAndDataIntegrity(t *testing.T) {
 			currentPool.Stop()
 		}
 
-		deliveryClient := delivery.NewClient(delivery.WithTimeout(1 * time.Second)) // short timeout
+		deliveryClient := delivery.NewClient(delivery.WithTimeout(1 * time.Second), delivery.WithSSRFProtection(true)) // short timeout
 
 		cfg := worker.DefaultConfig()
 		cfg.NumWorkers = 20

@@ -48,7 +48,7 @@ func setupE2E(t *testing.T, maxRetries int, retryPolicy retry.Policy) *testEnvir
 		t.Fatalf("failed to create tenant: %v", err)
 	}
 
-	client := delivery.NewClient(delivery.WithTimeout(2 * time.Second))
+	client := delivery.NewClient(delivery.WithTimeout(2 * time.Second), delivery.WithSSRFProtection(true))
 	workerCfg := worker.Config{
 		NumWorkers:     2,
 		BatchSize:      5,

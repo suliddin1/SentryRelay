@@ -3,7 +3,9 @@ package security
 import (
 	"errors"
 	"fmt"
+	"context"
 	"net"
+	"time"
 	"net/url"
 	"strings"
 )
@@ -136,4 +138,51 @@ func isBlockedIP(ip net.IP) bool {
 	}
 
 	return false
+}
+
+// SafeDialContext returns a dialer function that resolves DNS and strictly enforces SSRF protection
+// on the resolved IP addresses before establishing a TCP connection. This defends against DNS Rebinding attacks.
+func SafeDialContext(allowLocal bool) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	dialer := &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
+
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+
+		ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+		if err != nil {
+			return nil, err
+		}
+
+		var validIP net.IP
+		for _, ip := range ips {
+			if isMetadataIP(ip) {
+				return nil, fmt.Errorf("%w: resolved to metadata IP %s", ErrSSRFBlocked, ip.String())
+			}
+			if ip.IsLoopback() {
+				if allowLocal {
+					validIP = ip
+					break
+				}
+				return nil, fmt.Errorf("%w: resolved to loopback IP %s", ErrSSRFBlocked, ip.String())
+			}
+			if isBlockedIP(ip) {
+				return nil, fmt.Errorf("%w: resolved to private IP %s", ErrSSRFBlocked, ip.String())
+			}
+			validIP = ip
+			break
+		}
+
+		if validIP == nil {
+			return nil, fmt.Errorf("no valid IP addresses found for %s", host)
+		}
+
+		safeAddr := net.JoinHostPort(validIP.String(), port)
+		return dialer.DialContext(ctx, network, safeAddr)
+	}
 }
