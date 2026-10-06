@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS delivery_jobs (
 
 CREATE INDEX IF NOT EXISTS idx_jobs_poll ON delivery_jobs(status, next_retry_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_tenant_fair ON delivery_jobs(status, tenant_id, next_retry_at);
+CREATE INDEX IF NOT EXISTS idx_jobs_greedy ON delivery_jobs(next_retry_at, status);
 CREATE INDEX IF NOT EXISTS idx_jobs_lease ON delivery_jobs(status, leased_until);
 
 CREATE TABLE IF NOT EXISTS delivery_attempts (
@@ -132,6 +133,8 @@ func Open(dsn string) (*DB, error) {
 	if _, err := db.Exec("ALTER TABLE delivery_jobs ADD COLUMN tenant_id TEXT;"); err == nil {
 		db.Exec("UPDATE delivery_jobs SET tenant_id = (SELECT tenant_id FROM events WHERE events.id = delivery_jobs.event_id) WHERE tenant_id IS NULL;")
 	}
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_jobs_greedy ON delivery_jobs(next_retry_at, status);")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_jobs_tenant_fair ON delivery_jobs(status, tenant_id, next_retry_at);")
 
 	return &DB{db: db}, nil
 }
@@ -282,9 +285,9 @@ func (d *DB) ClaimJobs(ctx context.Context, batchSize int, leaseDuration time.Du
 		SELECT id, event_id, status, attempt_count, max_attempts, next_retry_at, created_at, updated_at
 		FROM delivery_jobs
 		WHERE id IN (
-			SELECT id FROM delivery_jobs 
-			WHERE (status = ? OR status = ?) AND next_retry_at <= ? 
-			GROUP BY tenant_id HAVING MIN(next_retry_at)
+			SELECT id FROM delivery_jobs WHERE status = ? AND next_retry_at <= ? GROUP BY tenant_id HAVING MIN(next_retry_at)
+			UNION ALL
+			SELECT id FROM delivery_jobs WHERE status = ? AND next_retry_at <= ? GROUP BY tenant_id HAVING MIN(next_retry_at)
 		)
 		ORDER BY next_retry_at ASC
 		LIMIT ?`
@@ -292,7 +295,7 @@ func (d *DB) ClaimJobs(ctx context.Context, batchSize int, leaseDuration time.Du
 	var jobIDs []string
 	var jobs []*model.DeliveryJob
 
-	rows, err := tx.QueryContext(ctx, fairQuery, string(model.StatusPending), string(model.StatusRetryPending), nowMs, batchSize)
+	rows, err := tx.QueryContext(ctx, fairQuery, string(model.StatusPending), nowMs, string(model.StatusRetryPending), nowMs, batchSize)
 	if err == nil {
 		for rows.Next() {
 			var j model.DeliveryJob
