@@ -154,3 +154,9 @@ go test -bench . -benchmem ./test/benchmark
 go build -o bin/sentryrelay ./cmd/sentryrelay
 ./bin/sentryrelay -port 8080 -db sentryrelay.db -workers 5 -seed-dev-tenant
 ```
+
+---
+
+## License
+
+This project is licensed under the MIT License.
