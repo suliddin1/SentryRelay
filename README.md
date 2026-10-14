@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/suliddin1/SentryRelay/actions/workflows/ci.yml/badge.svg)](https://github.com/suliddin1/SentryRelay/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/suliddin1/SentryRelay)](https://goreportcard.com/report/github.com/suliddin1/SentryRelay)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 SentryRelay is a production-oriented, fault-tolerant webhook delivery and ingestion engine written in Go. It guarantees durable event persistence, cryptographic tamper-resistance, crash recovery, lease-based queue dispatching, and exponential backoff retry semantics with automated Dead-Letter Queue (DLQ) routing.
 
@@ -159,4 +160,4 @@ go build -o bin/sentryrelay ./cmd/sentryrelay
 
 ## License
 
-This project is licensed under the MIT License.
+This project is licensed under the [MIT License](LICENSE).
